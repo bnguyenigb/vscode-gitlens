@@ -626,6 +626,7 @@ export class GitHubApi implements Disposable {
 					createdAt
 					permalink
 					number
+					id
 					title
 					state
 					updatedAt
@@ -750,6 +751,7 @@ export class GitHubApi implements Disposable {
 						createdAt
 						permalink
 						number
+						id
 						title
 						state
 						updatedAt

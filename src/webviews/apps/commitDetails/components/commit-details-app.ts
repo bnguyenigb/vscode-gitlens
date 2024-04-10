@@ -28,6 +28,7 @@ import {
 	PushCommandType,
 	SearchCommitCommandType,
 	StageFileCommandType,
+	SuggestChangesCommandType,
 	SwitchCommandType,
 	SwitchModeCommandType,
 	UnstageFileCommandType,
@@ -42,6 +43,7 @@ import { assertsSerialized, HostIpc } from '../../shared/ipc';
 import type { GlCommitDetails } from './gl-commit-details';
 import type { FileChangeListItemDetail } from './gl-details-base';
 import type { GlInspectNav } from './gl-inspect-nav';
+import type { CreatePatchEventDetail } from './gl-inspect-patch';
 import type { GlWipDetails } from './gl-wip-details';
 import '../../shared/components/code-icon';
 import './gl-commit-details';
@@ -189,7 +191,14 @@ export class GlCommitDetailsApp extends LitElement {
 			DOM.on<GlWipDetails, { name: string }>('gl-wip-details', 'data-action', e =>
 				this.onBranchAction(e.detail.name),
 			),
+			DOM.on<GlWipDetails, CreatePatchEventDetail>('gl-wip-details', 'gl-inspect-create-suggestions', e =>
+				this.onSuggestChanges(e.detail),
+			),
 		];
+	}
+
+	private onSuggestChanges(e: CreatePatchEventDetail) {
+		this._hostIpc.sendCommand(SuggestChangesCommandType, e);
 	}
 
 	private onMessageReceived(msg: IpcMessage) {

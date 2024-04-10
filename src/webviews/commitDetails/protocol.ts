@@ -5,6 +5,8 @@ import type { GitCommitIdentityShape, GitCommitStats } from '../../git/models/co
 import type { GitFileChangeShape } from '../../git/models/file';
 import type { IssueOrPullRequest } from '../../git/models/issue';
 import type { PullRequestShape } from '../../git/models/pullRequest';
+import type { DraftVisibility } from '../../gk/models/drafts';
+import type { Change, DraftUserSelection } from '../../plus/webviews/patchDetails/protocol';
 import type { DateTimeFormat } from '../../system/date';
 import type { Serialized } from '../../system/serialize';
 import type { WebviewState } from '../protocol';
@@ -98,6 +100,15 @@ export interface State extends WebviewState {
 export type ShowCommitDetailsViewCommandArgs = string[];
 
 // COMMANDS
+
+export interface SuggestChangesParams {
+	title: string;
+	description?: string;
+	visibility: DraftVisibility;
+	changesets: Record<string, Change>;
+	userSelections: DraftUserSelection[] | undefined;
+}
+export const SuggestChangesCommandType = new IpcCommandType<SuggestChangesParams>('commit/suggestChanges');
 
 export interface CommitActionsParams {
 	action: 'graph' | 'more' | 'scm' | 'sha';

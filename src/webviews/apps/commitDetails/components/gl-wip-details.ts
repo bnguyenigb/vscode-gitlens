@@ -58,6 +58,7 @@ export class GlWipDetails extends GlDetailsBase {
 				uri: wip.repo.uri,
 			},
 			files: wip.changes?.files ?? [],
+			checked: true,
 		};
 
 		return {
@@ -266,6 +267,11 @@ export class GlWipDetails extends GlDetailsBase {
 			.orgSettings=${this.orgSettings}
 			.preferences=${this.preferences}
 			.createState=${this.patchCreateState}
+			@gl-patch-create-patch=${(e: CustomEvent) => {
+				// this.onDataActionClick('create-patch');
+				console.log('gl-patch-create-patch', e);
+				void this.dispatchEvent(new CustomEvent('gl-inspect-create-suggestions', { detail: e.detail }));
+			}}
 		></gl-inspect-patch>`;
 	}
 

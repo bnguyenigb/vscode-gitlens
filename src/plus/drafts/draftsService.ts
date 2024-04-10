@@ -18,6 +18,7 @@ import type {
 	DraftPatchResponse,
 	DraftPendingUser,
 	DraftResponse,
+	DraftType,
 	DraftUser,
 	DraftVisibility,
 } from '../../gk/models/drafts';
@@ -39,7 +40,7 @@ export class DraftService implements Disposable {
 
 	@log({ args: { 2: false } })
 	async createDraft(
-		type: 'patch' | 'stash',
+		type: DraftType,
 		title: string,
 		changes: CreateDraftChange[],
 		options?: { description?: string; visibility?: DraftVisibility },
