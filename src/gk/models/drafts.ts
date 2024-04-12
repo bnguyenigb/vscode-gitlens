@@ -107,9 +107,10 @@ export interface CreateDraftPatchRequestFromChange {
 	patch: DraftPatchCreateRequest;
 	repository: Repository;
 	user: GitUser | undefined;
+	prEntityId?: string;
 }
 
-export type DraftVisibility = 'public' | 'private' | 'invite_only' | 'provider_access';
+export type DraftVisibility = 'public' | 'private' | 'invite_only';
 
 export type DraftType = 'patch' | 'stash' | 'suggested_pr_change';
 

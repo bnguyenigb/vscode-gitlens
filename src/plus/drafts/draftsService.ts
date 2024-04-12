@@ -1,4 +1,5 @@
 import type { Disposable } from 'vscode';
+import type { HeadersInit } from '@env/fetch';
 import type { Container } from '../../container';
 import { isSha, isUncommitted, shortenRevision } from '../../git/models/reference';
 import type { Repository } from '../../git/models/repository';
@@ -36,6 +37,7 @@ import type { LogScope } from '../../system/logger.scope';
 import { getLogScope } from '../../system/logger.scope';
 import { getSettledValue } from '../../system/promise';
 import type { ServerConnection } from '../gk/serverConnection';
+import type { IntegrationId } from '../integrations/providers/models';
 
 export class DraftService implements Disposable {
 	constructor(
@@ -83,6 +85,18 @@ export class DraftService implements Disposable {
 
 			type DraftResult = { data: CreateDraftResponse };
 
+			let providerAuthHeader: HeadersInit | undefined;
+			if (type === 'suggested_pr_change') {
+				const repo = patchRequests[0].repository;
+				const providerAuth = await this.getProviderAuthFromRepository(repo);
+				if (providerAuth == null) {
+					throw new Error('No provider integration found');
+				}
+				providerAuthHeader = {
+					'Provider-Auth': Buffer.from(JSON.stringify(providerAuth)).toString('base64'),
+				};
+			}
+
 			// POST v1/drafts
 			const createDraftRsp = await this.connection.fetchGkDevApi('v1/drafts', {
 				method: 'POST',
@@ -92,6 +106,7 @@ export class DraftService implements Disposable {
 					description: options?.description,
 					visibility: options?.visibility ?? 'public',
 				} satisfies CreateDraftRequest),
+				headers: providerAuthHeader,
 			});
 
 			if (!createDraftRsp.ok) {
@@ -112,6 +127,7 @@ export class DraftService implements Disposable {
 					gitUserEmail: user?.email,
 					patches: patchRequests.map(p => p.patch),
 				} satisfies DraftChangesetCreateRequest),
+				headers: providerAuthHeader,
 			});
 
 			if (!createChangesetRsp.ok) {
@@ -321,6 +337,7 @@ export class DraftService implements Disposable {
 			contents: contents,
 			repository: change.repository,
 			user: user,
+			prEntityId: change.prEntityId,
 		};
 	}
 
@@ -747,6 +764,27 @@ export class DraftService implements Disposable {
 			initialCommitSha: data.initialCommitSha,
 			remote: data.remote,
 			provider: data.provider,
+		};
+	}
+
+	async getProviderAuthFromRepository(
+		repository: Repository,
+	): Promise<{ provider: IntegrationId; token: string } | undefined> {
+		const remoteProvider = await repository.getBestRemoteWithIntegration();
+		if (remoteProvider == null) return undefined;
+
+		const integration = await remoteProvider.getIntegration();
+		if (integration == null) return undefined;
+
+		const session = await this.container.integrationAuthentication.getSession(
+			integration.id,
+			integration.authProviderDescriptor,
+		);
+		if (session == null) return undefined;
+
+		return {
+			provider: integration.authProvider.id,
+			token: session.accessToken,
 		};
 	}
 }
