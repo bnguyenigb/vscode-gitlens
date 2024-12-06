@@ -524,6 +524,24 @@ export class Container {
 		return this._gitlab;
 	}
 
+	private static _gitlab: Promise<import('./gitlab/gitlab').GitLabApi | undefined> | undefined;
+	static get gitlab() {
+		if (this._gitlab == null) {
+			this._gitlab = this._loadGitLabApi();
+		}
+
+		return this._gitlab;
+	}
+
+	private static async _loadGitLabApi() {
+		try {
+			return new (await import(/* webpackChunkName: "gitlab" */ './gitlab/gitlab')).GitLabApi();
+		} catch (ex) {
+			Logger.error(ex);
+			return undefined;
+		}
+	}
+
 	@memoize()
 	get id() {
 		return this._context.extension.id;

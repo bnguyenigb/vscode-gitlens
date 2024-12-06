@@ -1,30 +1,30 @@
-import type { Range, Uri } from 'vscode';
-import type { Autolink, AutolinkReference, DynamicAutolinkReference, MaybeEnrichedAutolink } from '../../autolinks';
-import { GlyphChars } from '../../constants';
-import type { GkProviderId } from '../../gk/models/repositoryIdentities';
-import type { GitLabRepositoryDescriptor } from '../../plus/integrations/providers/gitlab';
-import type { Brand, Unbrand } from '../../system/brand';
-import { fromNow } from '../../system/date';
-import { memoize } from '../../system/decorators/memoize';
-import { encodeUrl } from '../../system/encoding';
-import { escapeMarkdown, unescapeMarkdown } from '../../system/markdown';
-import { equalsIgnoreCase } from '../../system/string';
-import { getIssueOrPullRequestMarkdownIcon } from '../models/issue';
-import { isSha } from '../models/reference';
-import type { Repository } from '../models/repository';
-import type { RemoteProviderId } from './remoteProvider';
-import { RemoteProvider } from './remoteProvider';
+'use strict';
+import { AuthenticationSession, Range, Uri } from 'vscode';
+import { DynamicAutolinkReference } from '../../annotations/autolinks';
+import { AutolinkReference } from '../../config';
+import { Container } from '../../container';
+import { GitLabMergeRequest } from '../../gitlab/merge-request';
+import {
+	Account,
+	DefaultBranch,
+	GitRevision,
+	IssueOrPullRequest,
+	PullRequest,
+	PullRequestState,
+} from '../models/models';
+import { Repository } from '../models/repository';
+import { RichRemoteProvider } from './provider';
 
-const autolinkFullIssuesRegex = /\b([^/\s]+\/[^/\s]+?)(?:\\)?#([0-9]+)\b(?!]\()/g;
-const autolinkFullMergeRequestsRegex = /\b([^/\s]+\/[^/\s]+?)(?:\\)?!([0-9]+)\b(?!]\()/g;
 const fileRegex = /^\/([^/]+)\/([^/]+?)\/-\/blob(.+)$/i;
 const rangeRegex = /^L(\d+)(?:-(\d+))?$/;
 
-function isGitLabDotCom(domain: string): boolean {
-	return equalsIgnoreCase(domain, 'gitlab.com');
-}
+const authProvider = Object.freeze({ id: 'gitlab', scopes: ['repo'] });
 
-export class GitLabRemote extends RemoteProvider<GitLabRepositoryDescriptor> {
+export class GitLabRemote extends RichRemoteProvider {
+	protected get authProvider() {
+		return authProvider;
+	}
+
 	constructor(domain: string, path: string, protocol?: string, name?: string, custom: boolean = false) {
 		super(domain, path, protocol, name, custom);
 	}
@@ -33,261 +33,30 @@ export class GitLabRemote extends RemoteProvider<GitLabRepositoryDescriptor> {
 		return this.custom ? `${this.protocol}://${this.domain}/api` : `https://${this.domain}/api`;
 	}
 
-	protected override get issueLinkPattern(): string {
-		return `${this.baseUrl}/-/issues/<num>`;
-	}
-
 	private _autolinks: (AutolinkReference | DynamicAutolinkReference)[] | undefined;
-	override get autolinks(): (AutolinkReference | DynamicAutolinkReference)[] {
+	get autolinks(): (AutolinkReference | DynamicAutolinkReference)[] {
 		if (this._autolinks === undefined) {
 			this._autolinks = [
-				...super.autolinks,
 				{
 					prefix: '#',
-					url: this.issueLinkPattern,
-					alphanumeric: false,
-					ignoreCase: false,
+					url: `${this.baseUrl}/issues/<num>`,
 					title: `Open Issue #<num> on ${this.name}`,
-
-					type: 'issue',
-					description: `${this.name} Issue #<num>`,
-				},
-				{
-					prefix: '!',
-					url: `${this.baseUrl}/-/merge_requests/<num>`,
-					alphanumeric: false,
-					ignoreCase: false,
-					title: `Open Merge Request !<num> on ${this.name}`,
-
-					type: 'pullrequest',
-					description: `${this.name} Merge Request !<num>`,
-				},
-				{
-					tokenize: (
-						text: string,
-						outputFormat: 'html' | 'markdown' | 'plaintext',
-						tokenMapping: Map<string, string>,
-						enrichedAutolinks?: Map<string, MaybeEnrichedAutolink>,
-						prs?: Set<string>,
-						footnotes?: Map<number, string>,
-					) => {
-						return outputFormat === 'plaintext'
-							? text
-							: text.replace(autolinkFullIssuesRegex, (linkText: string, repo: string, num: string) => {
-									const url = encodeUrl(
-										`${this.protocol}://${this.domain}/${unescapeMarkdown(repo)}/-/issues/${num}`,
-									);
-									const title = ` "Open Issue #${num} from ${repo} on ${this.name}"`;
-
-									const token = `\x00${tokenMapping.size}\x00`;
-									if (outputFormat === 'markdown') {
-										tokenMapping.set(token, `[${linkText}](${url}${title})`);
-									} else if (outputFormat === 'html') {
-										tokenMapping.set(token, `<a href="${url}" title=${title}>${linkText}</a>`);
-									}
-
-									let footnoteIndex: number;
-
-									const issueResult = enrichedAutolinks?.get(num)?.[0];
-									if (issueResult?.value != null) {
-										if (issueResult.paused) {
-											if (footnotes != null && !prs?.has(num)) {
-												footnoteIndex = footnotes.size + 1;
-												footnotes.set(
-													footnoteIndex,
-													`[${getIssueOrPullRequestMarkdownIcon()} GitLab Issue ${repo}#${num} $(loading~spin)](${url}${title}")`,
-												);
-											}
-										} else {
-											const issue = issueResult.value;
-											const issueTitle = escapeMarkdown(issue.title.trim());
-											if (footnotes != null && !prs?.has(num)) {
-												footnoteIndex = footnotes.size + 1;
-												footnotes.set(
-													footnoteIndex,
-													`[${getIssueOrPullRequestMarkdownIcon(
-														issue,
-													)} **${issueTitle}**](${url}${title})\\\n${GlyphChars.Space.repeat(
-														5,
-													)}${linkText} ${issue.state} ${fromNow(
-														issue.closedDate ?? issue.createdDate,
-													)}`,
-												);
-											}
-										}
-									} else if (footnotes != null && !prs?.has(num)) {
-										footnoteIndex = footnotes.size + 1;
-										footnotes.set(
-											footnoteIndex,
-											`[${getIssueOrPullRequestMarkdownIcon()} GitLab Issue ${repo}#${num}](${url}${title})`,
-										);
-									}
-
-									return token;
-							  });
-					},
-					parse: (text: string, autolinks: Map<string, Autolink>) => {
-						let ownerAndRepo: string;
-						let num: string;
-
-						let match;
-						do {
-							match = autolinkFullIssuesRegex.exec(text);
-							if (match == null) break;
-
-							[, ownerAndRepo, num] = match;
-
-							const [owner, repo] = ownerAndRepo.split('/', 2);
-							autolinks.set(num, {
-								provider: this,
-								id: num,
-								prefix: `${ownerAndRepo}#`,
-								url: `${this.protocol}://${this.domain}/${ownerAndRepo}/-/issues/${num}`,
-								alphanumeric: false,
-								ignoreCase: true,
-								title: `Open Issue #<num> from ${ownerAndRepo} on ${this.name}`,
-
-								type: 'issue',
-								description: `${this.name} Issue ${ownerAndRepo}#${num}`,
-								descriptor: {
-									key: this.remoteKey,
-									owner: owner,
-									name: repo,
-								} satisfies GitLabRepositoryDescriptor,
-							});
-						} while (true);
-					},
-				},
-				{
-					tokenize: (
-						text: string,
-						outputFormat: 'html' | 'markdown' | 'plaintext',
-						tokenMapping: Map<string, string>,
-						enrichedAutolinks?: Map<string, MaybeEnrichedAutolink>,
-						prs?: Set<string>,
-						footnotes?: Map<number, string>,
-					) => {
-						return outputFormat === 'plaintext'
-							? text
-							: text.replace(
-									autolinkFullMergeRequestsRegex,
-									(linkText: string, repo: string, num: string) => {
-										const url = encodeUrl(
-											`${this.protocol}://${this.domain}/${repo}/-/merge_requests/${num}`,
-										);
-										const title = ` "Open Merge Request !${num} from ${repo} on ${this.name}"`;
-
-										const token = `\x00${tokenMapping.size}\x00`;
-										if (outputFormat === 'markdown') {
-											tokenMapping.set(token, `[${linkText}](${url}${title})`);
-										} else if (outputFormat === 'html') {
-											tokenMapping.set(token, `<a href="${url}" title=${title}>${linkText}</a>`);
-										}
-
-										let footnoteIndex: number;
-
-										const issueResult = enrichedAutolinks?.get(num)?.[0];
-										if (issueResult?.value != null) {
-											if (issueResult.paused) {
-												if (footnotes != null && !prs?.has(num)) {
-													footnoteIndex = footnotes.size + 1;
-													footnotes.set(
-														footnoteIndex,
-														`[${getIssueOrPullRequestMarkdownIcon()} ${
-															this.name
-														} Merge Request ${repo}!${num} $(loading~spin)](${url}${title}")`,
-													);
-												}
-											} else {
-												const issue = issueResult.value;
-												const issueTitle = escapeMarkdown(issue.title.trim());
-												if (footnotes != null && !prs?.has(num)) {
-													footnoteIndex = footnotes.size + 1;
-													footnotes.set(
-														footnoteIndex,
-														`[${getIssueOrPullRequestMarkdownIcon(
-															issue,
-														)} **${issueTitle}**](${url}${title})\\\n${GlyphChars.Space.repeat(
-															5,
-														)}${linkText} ${issue.state} ${fromNow(
-															issue.closedDate ?? issue.createdDate,
-														)}`,
-													);
-												}
-											}
-										} else if (footnotes != null && !prs?.has(num)) {
-											footnoteIndex = footnotes.size + 1;
-											footnotes.set(
-												footnoteIndex,
-												`[${getIssueOrPullRequestMarkdownIcon()} ${
-													this.name
-												} Merge Request ${repo}!${num}](${url}${title})`,
-											);
-										}
-										return token;
-									},
-							  );
-					},
-					parse: (text: string, autolinks: Map<string, Autolink>) => {
-						let ownerAndRepo: string;
-						let num: string;
-
-						let match;
-						do {
-							match = autolinkFullMergeRequestsRegex.exec(text);
-							if (match == null) break;
-
-							[, ownerAndRepo, num] = match;
-
-							const [owner, repo] = ownerAndRepo.split('/', 2);
-							autolinks.set(num, {
-								provider: this,
-								id: num,
-								prefix: `${ownerAndRepo}!`,
-								url: `${this.protocol}://${this.domain}/${ownerAndRepo}/-/merge_requests/${num}`,
-								alphanumeric: false,
-								ignoreCase: true,
-								title: `Open Merge Request !<num> from ${ownerAndRepo} on ${this.name}`,
-
-								type: 'pullrequest',
-								description: `${this.name} Merge Request !${num} from ${ownerAndRepo}`,
-
-								descriptor: {
-									key: this.remoteKey,
-									owner: owner,
-									name: repo,
-								} satisfies GitLabRepositoryDescriptor,
-							});
-						} while (true);
-					},
 				},
 			];
 		}
 		return this._autolinks;
 	}
 
-	override get icon() {
+	get icon() {
 		return 'gitlab';
 	}
 
-	get id(): RemoteProviderId {
+	get id() {
 		return 'gitlab';
-	}
-
-	get gkProviderId(): GkProviderId {
-		return (!isGitLabDotCom(this.domain)
-			? 'gitlabSelfHosted'
-			: 'gitlab') satisfies Unbrand<GkProviderId> as Brand<GkProviderId>;
 	}
 
 	get name() {
 		return this.formatName('GitLab');
-	}
-
-	@memoize()
-	override get repoDesc(): GitLabRepositoryDescriptor {
-		const [owner, repo] = this.splitPath();
-		return { key: this.remoteKey, owner: owner, name: repo };
 	}
 
 	async getLocalInfoFromRemoteUri(
@@ -322,52 +91,49 @@ export class GitLabRemote extends RemoteProvider<GitLabRepositoryDescriptor> {
 		let index = path.indexOf('/', 1);
 		if (index !== -1) {
 			const sha = path.substring(1, index);
-			if (isSha(sha)) {
-				const uri = repository.toAbsoluteUri(path.substring(index), { validate: options?.validate });
+			if (GitRevision.isSha(sha)) {
+				const uri = repository.toAbsoluteUri(path.substr(index), { validate: options?.validate });
 				if (uri != null) return { uri: uri, startLine: startLine, endLine: endLine };
 			}
 		}
 
+		const branches = new Set<string>(
+			(
+				await repository.getBranches({
+					filter: b => b.remote,
+				})
+			).map(b => b.getNameWithoutRemote()),
+		);
+
 		// Check for a link with branch (and deal with branch names with /)
 		let branch;
-		const possibleBranches = new Map<string, string>();
 		index = path.length;
 		do {
 			index = path.lastIndexOf('/', index - 1);
 			branch = path.substring(1, index);
 
-			possibleBranches.set(branch, path.substring(index));
-		} while (index > 0);
-
-		if (possibleBranches.size !== 0) {
-			const { values: branches } = await repository.git.getBranches({
-				filter: b => b.remote && possibleBranches.has(b.getNameWithoutRemote()),
-			});
-			for (const branch of branches) {
-				const path = possibleBranches.get(branch.getNameWithoutRemote());
-				if (path == null) continue;
-
-				const uri = repository.toAbsoluteUri(path, { validate: options?.validate });
+			if (branches.has(branch)) {
+				const uri = repository.toAbsoluteUri(path.substr(index), { validate: options?.validate });
 				if (uri != null) return { uri: uri, startLine: startLine, endLine: endLine };
 			}
-		}
+		} while (index > 0);
 
 		return undefined;
 	}
 
 	protected getUrlForBranches(): string {
-		return this.encodeUrl(`${this.baseUrl}/-/branches`);
+		return this.encodeUrl(`${this.baseUrl}/branches`);
 	}
 
 	protected getUrlForBranch(branch: string): string {
-		return this.encodeUrl(`${this.baseUrl}/-/tree/${branch}`);
+		return this.encodeUrl(`${this.baseUrl}/tree/${branch}`);
 	}
 
 	protected getUrlForCommit(sha: string): string {
-		return this.encodeUrl(`${this.baseUrl}/-/commit/${sha}`);
+		return this.encodeUrl(`${this.baseUrl}/commit/${sha}`);
 	}
 
-	protected override getUrlForComparison(base: string, compare: string, notation: '..' | '...'): string {
+	protected getUrlForComparison(base: string, compare: string, notation: '..' | '...'): string {
 		return this.encodeUrl(`${this.baseUrl}/-/compare/${base}${notation}${compare}`);
 	}
 
@@ -383,8 +149,83 @@ export class GitLabRemote extends RemoteProvider<GitLabRepositoryDescriptor> {
 			line = '';
 		}
 
-		if (sha) return `${this.encodeUrl(`${this.baseUrl}/-/blob/${sha}/${fileName}`)}${line}`;
-		if (branch) return `${this.encodeUrl(`${this.baseUrl}/-/blob/${branch}/${fileName}`)}${line}`;
+		if (sha) return `${this.encodeUrl(`${this.baseUrl}/blob/${sha}/${fileName}`)}${line}`;
+		if (branch) return `${this.encodeUrl(`${this.baseUrl}/blob/${branch}/${fileName}`)}${line}`;
 		return `${this.encodeUrl(`${this.baseUrl}?path=${fileName}`)}${line}`;
+	}
+
+	protected async getProviderAccountForCommit(
+		{ accessToken }: AuthenticationSession,
+		ref: string,
+		options?: {
+			avatarSize?: number;
+		},
+	): Promise<Account | undefined> {
+		const [owner, repo] = this.splitPath();
+		return (await Container.gitlab)?.getAccountForCommit(this, accessToken, owner, repo, ref, {
+			...options,
+			baseUrl: this.apiBaseUrl,
+		});
+	}
+
+	protected async getProviderAccountForEmail(
+		{ accessToken }: AuthenticationSession,
+		email: string,
+		options?: {
+			avatarSize?: number;
+		},
+	): Promise<Account | undefined> {
+		const [owner, repo] = this.splitPath();
+		return (await Container.gitlab)?.getAccountForEmail(this, accessToken, owner, repo, email, {
+			...options,
+			baseUrl: this.apiBaseUrl,
+		});
+	}
+
+	protected async getProviderDefaultBranch({
+		accessToken,
+	}: AuthenticationSession): Promise<DefaultBranch | undefined> {
+		const [owner, repo] = this.splitPath();
+		return (await Container.gitlab)?.getDefaultBranch(this, accessToken, owner, repo, {
+			baseUrl: this.apiBaseUrl,
+		});
+	}
+
+	protected async getProviderIssueOrPullRequest(
+		{ accessToken }: AuthenticationSession,
+		id: string,
+	): Promise<IssueOrPullRequest | undefined> {
+		const [owner, repo] = this.splitPath();
+		return (await Container.gitlab)?.getIssueOrPullRequest(this, accessToken, owner, repo, Number(id), {
+			baseUrl: this.apiBaseUrl,
+		});
+	}
+
+	protected async getProviderPullRequestForBranch(
+		{ accessToken }: AuthenticationSession,
+		branch: string,
+		options?: {
+			avatarSize?: number;
+			include?: PullRequestState[];
+		},
+	): Promise<PullRequest | undefined> {
+		const [owner, repo] = this.splitPath();
+		const { include, ...opts } = options ?? {};
+
+		return (await Container.gitlab)?.getPullRequestForBranch(this, accessToken, owner, repo, branch, {
+			...opts,
+			include: include?.map(s => GitLabMergeRequest.toState(s)),
+			baseUrl: this.apiBaseUrl,
+		});
+	}
+
+	protected async getProviderPullRequestForCommit(
+		{ accessToken }: AuthenticationSession,
+		ref: string,
+	): Promise<PullRequest | undefined> {
+		const [owner, repo] = this.splitPath();
+		return (await Container.gitlab)?.getPullRequestForCommit(this, accessToken, owner, repo, ref, {
+			baseUrl: this.apiBaseUrl,
+		});
 	}
 }
