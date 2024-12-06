@@ -1,13 +1,13 @@
 import type { TextDocumentShowOptions, TextEditor, Uri } from 'vscode';
 import { window } from 'vscode';
-import { Commands } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { GitUri } from '../git/gitUri';
 import type { GitCommit } from '../git/models/commit';
 import { uncommittedStaged } from '../git/models/constants';
 import { showFileNotUnderSourceControlWarningMessage, showGenericErrorMessage } from '../messages';
-import { command, executeCommand } from '../system/command';
 import { Logger } from '../system/logger';
+import { command, executeCommand } from '../system/vscode/command';
 import type { CommandContext } from './base';
 import { ActiveEditorCommand, getCommandUri } from './base';
 import type { DiffWithCommandArgs } from './diffWith';

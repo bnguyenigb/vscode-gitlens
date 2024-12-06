@@ -1,6 +1,7 @@
 import type { TextDocumentShowOptions, TextEditor } from 'vscode';
 import { FileType, Uri, workspace } from 'vscode';
-import { Commands, GlyphChars } from '../constants';
+import { GlyphChars } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { openFolderCompare } from '../git/actions/commit';
 import { GitUri } from '../git/gitUri';
@@ -9,9 +10,9 @@ import { showGenericErrorMessage } from '../messages';
 import { showCommitPicker } from '../quickpicks/commitPicker';
 import { CommandQuickPickItem } from '../quickpicks/items/common';
 import { getBestRepositoryOrShowPicker } from '../quickpicks/repositoryPicker';
-import { command } from '../system/command';
 import { Logger } from '../system/logger';
 import { pad } from '../system/string';
+import { command } from '../system/vscode/command';
 import { ActiveEditorCommand, getCommandUri } from './base';
 
 export interface DiffFolderWithRevisionCommandArgs {

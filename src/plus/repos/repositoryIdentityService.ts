@@ -1,19 +1,17 @@
 import type { Disposable } from 'vscode';
 import { Uri, window } from 'vscode';
 import type { Container } from '../../container';
-import { shortenRevision } from '../../git/models/reference';
 import { RemoteResourceType } from '../../git/models/remoteResource';
 import type { Repository } from '../../git/models/repository';
 import { parseGitRemoteUrl } from '../../git/parsers/remoteParser';
-import { getRemoteProviderMatcher } from '../../git/remotes/remoteProviders';
 import type {
-	GkRepositoryId,
-	RepositoryIdentity,
+	GkProviderId,
 	RepositoryIdentityDescriptor,
-	RepositoryIdentityResponse,
+	RepositoryIdentityProviderDescriptor,
 } from '../../gk/models/repositoryIdentities';
 import { missingRepositoryId } from '../../gk/models/repositoryIdentities';
 import { log } from '../../system/decorators/log';
+import { getSettledValue } from '../../system/promise';
 import type { ServerConnection } from '../gk/serverConnection';
 
 export class RepositoryIdentityService implements Disposable {
@@ -24,59 +22,41 @@ export class RepositoryIdentityService implements Disposable {
 
 	dispose(): void {}
 
-	getRepository(
-		id: GkRepositoryId,
-		options?: { openIfNeeded?: boolean; keepOpen?: boolean; prompt?: boolean; skipRefValidation?: boolean },
-	): Promise<Repository | undefined>;
-	getRepository(
-		identity: RepositoryIdentityDescriptor,
-		options?: { openIfNeeded?: boolean; keepOpen?: boolean; prompt?: boolean; skipRefValidation?: boolean },
-	): Promise<Repository | undefined>;
-
 	@log()
-	getRepository(
-		idOrIdentity: GkRepositoryId | RepositoryIdentityDescriptor,
+	getRepository<T extends string | GkProviderId>(
+		identity: RepositoryIdentityDescriptor<T>,
 		options?: { openIfNeeded?: boolean; keepOpen?: boolean; prompt?: boolean; skipRefValidation?: boolean },
 	): Promise<Repository | undefined> {
-		return this.locateRepository(idOrIdentity, options);
+		return this.locateRepository(identity, options);
+	}
+
+	async getRepositoryIdentity<T extends string | GkProviderId>(
+		repository: Repository,
+	): Promise<RepositoryIdentityDescriptor<T>> {
+		const [bestRemotePromise, initialCommitShaPromise] = await Promise.allSettled([
+			this.container.git.getBestRemoteWithProvider(repository.uri),
+			this.container.git.getFirstCommitSha(repository.uri),
+		]);
+		const bestRemote = getSettledValue(bestRemotePromise);
+
+		return {
+			name: repository.name,
+			initialCommitSha: getSettledValue(initialCommitShaPromise),
+			remote: bestRemote,
+			provider: bestRemote?.provider?.providerDesc as RepositoryIdentityProviderDescriptor<T>,
+		};
 	}
 
 	@log()
-	async getRepositoryOrIdentity(
-		id: GkRepositoryId,
-		options?: { openIfNeeded?: boolean; keepOpen?: boolean; prompt?: boolean; skipRefValidation?: boolean },
-	): Promise<Repository | RepositoryIdentity> {
-		const identity = await this.getRepositoryIdentity(id);
-		return (await this.locateRepository(identity, options)) ?? identity;
-	}
-
-	private async locateRepository(
-		id: GkRepositoryId,
-		options?: { openIfNeeded?: boolean; keepOpen?: boolean; prompt?: boolean; skipRefValidation?: boolean },
-	): Promise<Repository | undefined>;
-	private async locateRepository(
-		identity: RepositoryIdentityDescriptor,
-		options?: { openIfNeeded?: boolean; keepOpen?: boolean; prompt?: boolean; skipRefValidation?: boolean },
-	): Promise<Repository | undefined>;
-	private async locateRepository(
-		idOrIdentity: GkRepositoryId | RepositoryIdentityDescriptor,
-		options?: { openIfNeeded?: boolean; keepOpen?: boolean; prompt?: boolean; skipRefValidation?: boolean },
-	): Promise<Repository | undefined>;
-	@log()
-	private async locateRepository(
-		idOrIdentity: GkRepositoryId | RepositoryIdentityDescriptor,
+	private async locateRepository<T extends string | GkProviderId>(
+		identity: RepositoryIdentityDescriptor<T>,
 		options?: { openIfNeeded?: boolean; keepOpen?: boolean; prompt?: boolean; skipRefValidation?: boolean },
 	): Promise<Repository | undefined> {
-		const identity =
-			typeof idOrIdentity === 'string' ? await this.getRepositoryIdentity(idOrIdentity) : idOrIdentity;
-
 		const hasInitialCommitSha =
-			identity?.initialCommitSha != null && identity.initialCommitSha !== missingRepositoryId;
+			identity.initialCommitSha != null && identity.initialCommitSha !== missingRepositoryId;
 		const hasRemoteUrl = identity?.remote?.url != null;
 		const hasProviderInfo =
-			identity?.provider?.id != null &&
-			identity.provider.repoDomain != null &&
-			identity.provider.repoName != null;
+			identity.provider?.id != null && identity.provider.repoDomain != null && identity.provider.repoName != null;
 
 		if (!hasInitialCommitSha && !hasRemoteUrl && !hasProviderInfo) {
 			return undefined;
@@ -120,7 +100,7 @@ export class RepositoryIdentityService implements Disposable {
 			// As a fallback, try to match using the repo id.
 			for (const repo of this.container.git.repositories) {
 				if (remoteDomain != null && remotePath != null) {
-					const matchingRemotes = await repo.getRemotes({
+					const matchingRemotes = await repo.git.getRemotes({
 						filter: r => r.matches(remoteDomain, remotePath),
 					});
 					if (matchingRemotes.length > 0) {
@@ -144,7 +124,7 @@ export class RepositoryIdentityService implements Disposable {
 			const locate = { title: 'Locate Repository' };
 			const cancel = { title: 'Cancel', isCloseAffordance: true };
 			const decision = await window.showInformationMessage(
-				`Unable to locate a repository for ${identity.name}`,
+				`Unable to find a repository for '${identity.name}'.\nWould you like to locate it?`,
 				{ modal: true },
 				locate,
 				cancel,
@@ -174,50 +154,29 @@ export class RepositoryIdentityService implements Disposable {
 				(await this.container.git.validateReference(locatedRepo.uri, identity.initialCommitSha))
 			) {
 				foundRepo = locatedRepo;
-				await this.addFoundRepositoryToMap(foundRepo, identity);
+				await this.addRepositoryToPathMap(foundRepo, identity);
 			}
 		}
 
 		return foundRepo;
 	}
 
-	@log()
-	async getRepositoryIdentity(id: GkRepositoryId): Promise<RepositoryIdentity> {
-		type Result = { data: RepositoryIdentityResponse };
+	async addRepositoryToPathMap<T extends string | GkProviderId>(
+		repo: Repository,
+		identity?: RepositoryIdentityDescriptor<T>,
+	) {
+		if (repo.virtual) return;
 
-		const rsp = await this.connection.fetchGkDevApi(`/v1/git-repositories/${id}`, { method: 'GET' });
-		const data = ((await rsp.json()) as Result).data;
+		const [identityResult, remotesResult] = await Promise.allSettled([
+			identity == null ? this.getRepositoryIdentity<T>(repo) : undefined,
+			repo.git.getRemotes(),
+		]);
 
-		let name: string;
-		if ('name' in data && typeof data.name === 'string') {
-			name = data.name;
-		} else if (data.provider?.repoName != null) {
-			name = data.provider.repoName;
-		} else if (data.remote?.url != null && data.remote?.domain != null && data.remote?.path != null) {
-			const matcher = getRemoteProviderMatcher(this.container);
-			const provider = matcher(data.remote.url, data.remote.domain, data.remote.path);
-			name = provider?.repoName ?? data.remote.path;
-		} else {
-			name =
-				data.remote?.path ??
-				`Unknown ${data.initialCommitSha ? ` (${shortenRevision(data.initialCommitSha)})` : ''}`;
-		}
+		identity ??= getSettledValue(identityResult);
+		const remotes = getSettledValue(remotesResult) ?? [];
 
-		return {
-			id: data.id,
-			createdAt: new Date(data.createdAt),
-			updatedAt: new Date(data.updatedAt),
-			name: name,
-			initialCommitSha: data.initialCommitSha,
-			remote: data.remote,
-			provider: data.provider,
-		};
-	}
-
-	private async addFoundRepositoryToMap(repo: Repository, identity?: RepositoryIdentityDescriptor) {
 		const repoPath = repo.uri.fsPath;
 
-		const remotes = await repo.getRemotes();
 		for (const remote of remotes) {
 			const remoteUrl = remote.provider?.url({ type: RemoteResourceType.Repo });
 			if (remoteUrl != null) {

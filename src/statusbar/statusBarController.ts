@@ -1,23 +1,23 @@
 import type { ConfigurationChangeEvent, StatusBarItem, TextEditor, Uri } from 'vscode';
 import { CancellationTokenSource, Disposable, MarkdownString, StatusBarAlignment, window } from 'vscode';
-import { Command } from '../commands/base';
 import type { ToggleFileChangesAnnotationCommandArgs } from '../commands/toggleFileAnnotations';
 import { StatusBarCommand } from '../config';
-import { Commands, GlyphChars } from '../constants';
+import { GlyphChars } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { CommitFormatter } from '../git/formatters/commitFormatter';
 import type { PullRequest } from '../git/models/pullRequest';
 import { detailsMessage } from '../hovers/hovers';
-import type { MaybePausedResult } from '../system/cancellation';
-import { pauseOnCancelOrTimeout } from '../system/cancellation';
-import { asCommand } from '../system/command';
-import { configuration } from '../system/configuration';
+import { createMarkdownCommandLink } from '../system/commands';
 import { debug } from '../system/decorators/log';
 import { once } from '../system/event';
 import { Logger } from '../system/logger';
-import { getLogScope } from '../system/logger.scope';
-import { getSettledValue } from '../system/promise';
-import { isTextEditor } from '../system/utils';
+import { getLogScope, setLogScopeExit } from '../system/logger.scope';
+import type { MaybePausedResult } from '../system/promise';
+import { getSettledValue, pauseOnCancelOrTimeout } from '../system/promise';
+import { createCommand } from '../system/vscode/command';
+import { configuration } from '../system/vscode/configuration';
+import { isTrackableTextEditor } from '../system/vscode/utils';
 import type { LinesChangeEvent, LineState } from '../trackers/lineTracker';
 
 export class StatusBarController implements Disposable {
@@ -161,7 +161,10 @@ export class StatusBarController implements Disposable {
 				const trackedDocumentPromise = this.container.documentTracker.get(e.editor.document);
 				queueMicrotask(async () => {
 					const doc = await trackedDocumentPromise;
-					if (!doc?.isBlameable) return;
+					if (doc == null) return;
+
+					const status = await doc?.getStatus();
+					if (!status?.blameable) return;
 
 					statusBarItem.tooltip = new MarkdownString();
 					statusBarItem.tooltip.isTrusted = { enabledCommands: [Commands.ShowSettingsPage] };
@@ -171,17 +174,17 @@ export class StatusBarController implements Disposable {
 						statusBarItem.tooltip.appendMarkdown(
 							`Blame will resume after a [${configuration.get(
 								'advanced.blame.delayAfterEdit',
-							)} ms delay](${Command.getMarkdownCommandArgsCore<[undefined, string]>(
-								Commands.ShowSettingsPage,
-								[undefined, 'advanced.blame.delayAfterEdit'],
-							)} 'Change the after edit delay') to limit the performance impact because there are unsaved changes`,
+							)} ms delay](${createMarkdownCommandLink<[undefined, string]>(Commands.ShowSettingsPage, [
+								undefined,
+								'advanced.blame.delayAfterEdit',
+							])} 'Change the after edit delay') to limit the performance impact because there are unsaved changes`,
 						);
 					} else {
 						statusBarItem.text = '$(debug-pause) Blame Paused';
 						statusBarItem.tooltip.appendMarkdown(
 							`Blame will resume after saving because there are unsaved changes and the file is over the [${configuration.get(
 								'advanced.blame.sizeThresholdAfterEdit',
-							)} line threshold](${Command.getMarkdownCommandArgsCore<[undefined, string]>(
+							)} line threshold](${createMarkdownCommandLink<[undefined, string]>(
 								Commands.ShowSettingsPage,
 								[undefined, 'advanced.blame.sizeThresholdAfterEdit'],
 							)} 'Change the after edit line threshold') to limit the performance impact`,
@@ -202,17 +205,21 @@ export class StatusBarController implements Disposable {
 		this._statusBarBlame?.hide();
 	}
 
-	@debug<StatusBarController['updateBlame']>({
-		args: {
-			0: false,
-			1: s => s.commit?.sha,
-		},
-	})
+	@debug<StatusBarController['updateBlame']>({ args: { 1: s => s.commit?.sha } })
 	private async updateBlame(editor: TextEditor, state: LineState) {
+		const scope = getLogScope();
+
 		const cfg = configuration.get('statusBar');
-		if (!cfg.enabled || this._statusBarBlame == null || !isTextEditor(editor)) {
+		if (!cfg.enabled || this._statusBarBlame == null || !isTrackableTextEditor(editor)) {
 			this._cancellation?.cancel();
 			this._selectedSha = undefined;
+
+			setLogScopeExit(
+				scope,
+				` \u2022 skipped; ${
+					!cfg.enabled || this._statusBarBlame == null ? 'disabled' : 'not a trackable editor'
+				}`,
+			);
 
 			return;
 		}
@@ -220,6 +227,8 @@ export class StatusBarController implements Disposable {
 		const { commit } = state;
 		if (commit == null) {
 			this._cancellation?.cancel();
+
+			setLogScopeExit(scope, ' \u2022 skipped; no commit found');
 
 			return;
 		}
@@ -230,10 +239,11 @@ export class StatusBarController implements Disposable {
 				this._statusBarBlame.text = `$(git-commit)${this._statusBarBlame.text.substring(8)}`;
 			}
 
+			setLogScopeExit(scope, ' \u2022 skipped; same commit');
+
 			return;
 		}
 
-		const scope = getLogScope();
 		this._selectedSha = commit.sha;
 
 		this._cancellation?.cancel();
@@ -289,34 +299,30 @@ export class StatusBarController implements Disposable {
 				break;
 			case StatusBarCommand.ToggleFileChanges: {
 				if (commit.file != null) {
-					this._statusBarBlame.command = asCommand<[Uri, ToggleFileChangesAnnotationCommandArgs]>({
-						title: 'Toggle File Changes',
-						command: Commands.ToggleFileChanges,
-						arguments: [
-							commit.file.uri,
-							{
-								type: 'changes',
-								context: { sha: commit.sha, only: false, selection: false },
-							},
-						],
-					});
+					this._statusBarBlame.command = createCommand<[Uri, ToggleFileChangesAnnotationCommandArgs]>(
+						Commands.ToggleFileChanges,
+						'Toggle File Changes',
+						commit.file.uri,
+						{
+							type: 'changes',
+							context: { sha: commit.sha, only: false, selection: false },
+						},
+					);
 				}
 				actionTooltip = 'Click to Toggle File Changes';
 				break;
 			}
 			case StatusBarCommand.ToggleFileChangesOnly: {
 				if (commit.file != null) {
-					this._statusBarBlame.command = asCommand<[Uri, ToggleFileChangesAnnotationCommandArgs]>({
-						title: 'Toggle File Changes',
-						command: Commands.ToggleFileChanges,
-						arguments: [
-							commit.file.uri,
-							{
-								type: 'changes',
-								context: { sha: commit.sha, only: true, selection: false },
-							},
-						],
-					});
+					this._statusBarBlame.command = createCommand<[Uri, ToggleFileChangesAnnotationCommandArgs]>(
+						Commands.ToggleFileChanges,
+						'Toggle File Changes',
+						commit.file.uri,
+						{
+							type: 'changes',
+							context: { sha: commit.sha, only: true, selection: false },
+						},
+					);
 				}
 				actionTooltip = 'Click to Toggle File Changes';
 				break;

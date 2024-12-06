@@ -1,18 +1,18 @@
-import type { HttpsProxyAgent } from 'https-proxy-agent';
-import type { CancellationToken, Disposable } from 'vscode';
-import { Uri, window } from 'vscode';
 import type { RequestInit, Response } from '@env/fetch';
 import { fetch, getProxyAgent, wrapForForcedInsecureSSL } from '@env/fetch';
 import { isWeb } from '@env/platform';
+import type { HttpsProxyAgent } from 'https-proxy-agent';
+import type { CancellationToken, Disposable } from 'vscode';
+import { Uri, window } from 'vscode';
 import type { Container } from '../../../../container';
 import {
 	AuthenticationError,
 	AuthenticationErrorReason,
 	CancellationError,
 	ProviderFetchError,
-	ProviderRequestClientError,
-	ProviderRequestNotFoundError,
-	ProviderRequestRateLimitError,
+	RequestClientError,
+	RequestNotFoundError,
+	RequestRateLimitError,
 } from '../../../../errors';
 import type { Account } from '../../../../git/models/author';
 import type { DefaultBranch } from '../../../../git/models/defaultBranch';
@@ -24,13 +24,13 @@ import {
 	showIntegrationRequestFailed500WarningMessage,
 	showIntegrationRequestTimedOutWarningMessage,
 } from '../../../../messages';
-import { configuration } from '../../../../system/configuration';
 import { debug } from '../../../../system/decorators/log';
 import { Logger } from '../../../../system/logger';
 import type { LogScope } from '../../../../system/logger.scope';
 import { getLogScope, setLogScopeExit } from '../../../../system/logger.scope';
 import { maybeStopWatch } from '../../../../system/stopwatch';
 import { equalsIgnoreCase } from '../../../../system/string';
+import { configuration } from '../../../../system/vscode/configuration';
 import type {
 	GitLabCommit,
 	GitLabIssue,
@@ -41,6 +41,12 @@ import type {
 	GitLabUser,
 } from './models';
 import { fromGitLabMergeRequestREST, fromGitLabMergeRequestState } from './models';
+
+// drop it as soon as we switch to @gitkraken/providers-api
+const gitlabUserIdPrefix = 'gid://gitlab/User/';
+function buildGitLabUserId(id: string | undefined): string | undefined {
+	return id?.startsWith(gitlabUserIdPrefix) ? id.substring(gitlabUserIdPrefix.length) : id;
+}
 
 export class GitLabApi implements Disposable {
 	private readonly _disposable: Disposable;
@@ -136,13 +142,14 @@ export class GitLabApi implements Disposable {
 
 			return {
 				provider: provider,
+				id: String(user.id),
 				name: user.name || undefined,
 				email: commit.author_email || undefined,
 				avatarUrl: user.avatarUrl || undefined,
 				username: user.username || undefined,
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, provider, scope);
 		}
@@ -168,13 +175,14 @@ export class GitLabApi implements Disposable {
 
 			return {
 				provider: provider,
+				id: String(user.id),
 				name: user.name || undefined,
 				email: user.publicEmail || undefined,
 				avatarUrl: user.avatarUrl || undefined,
 				username: user.username || undefined,
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, provider, scope);
 		}
@@ -234,7 +242,7 @@ export class GitLabApi implements Disposable {
 				name: defaultBranch,
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, provider, scope);
 		}
@@ -271,6 +279,7 @@ export class GitLabApi implements Disposable {
 	project(fullPath: $fullPath) {
 		mergeRequest(iid: $iid) {
 			author {
+				id
 				name
 				avatarUrl
 				webUrl
@@ -286,6 +295,7 @@ export class GitLabApi implements Disposable {
 		}
 		issue(iid: $iid) {
 			author {
+				id
 				name
 				avatarUrl
 				webUrl
@@ -352,7 +362,7 @@ export class GitLabApi implements Disposable {
 
 			return undefined;
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, provider, scope);
 		}
@@ -398,6 +408,7 @@ export class GitLabApi implements Disposable {
 			nodes {
 				iid
 				author {
+					id
 					name
 					avatarUrl
 					webUrl
@@ -487,6 +498,7 @@ export class GitLabApi implements Disposable {
 			return new PullRequest(
 				provider,
 				{
+					id: buildGitLabUserId(pr.author?.id) ?? '',
 					name: pr.author?.name ?? 'Unknown',
 					avatarUrl: pr.author?.avatarUrl ?? '',
 					url: pr.author?.webUrl ?? '',
@@ -504,7 +516,7 @@ export class GitLabApi implements Disposable {
 				pr.mergedAt == null ? undefined : new Date(pr.mergedAt),
 			);
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, provider, scope);
 		}
@@ -553,7 +565,7 @@ export class GitLabApi implements Disposable {
 
 			return fromGitLabMergeRequestREST(mrs[0], provider, { owner: owner, repo: repo });
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, provider, scope);
 		}
@@ -604,7 +616,7 @@ export class GitLabApi implements Disposable {
 						: undefined,
 			} satisfies RepositoryMetadata;
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, provider, scope);
 		}
@@ -688,14 +700,14 @@ $search: String!
 
 			return users;
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return [];
+			if (ex instanceof RequestNotFoundError) return [];
 
 			this.handleException(ex, provider, scope);
 			return [];
 		}
 	}
 
-	private getProjectId(
+	getProjectId(
 		provider: Provider,
 		token: string,
 		group: string,
@@ -759,7 +771,7 @@ $search: String!
 			setLogScopeExit(scope, ` \u2022 projectId=${projectId}`);
 			return projectId;
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			this.handleException(ex, provider, scope);
 			return undefined;
@@ -890,7 +902,7 @@ $search: String!
 			case 404: // Not found
 			case 410: // Gone
 			case 422: // Unprocessable Entity
-				throw new ProviderRequestNotFoundError(ex);
+				throw new RequestNotFoundError(ex);
 			// case 429: //Too Many Requests
 			case 401: // Unauthorized
 				throw new AuthenticationError('gitlab', AuthenticationErrorReason.Unauthorized, ex);
@@ -906,7 +918,7 @@ $search: String!
 						}
 					}
 
-					throw new ProviderRequestRateLimitError(ex, token, resetAt);
+					throw new RequestRateLimitError(ex, token, resetAt);
 				}
 				throw new AuthenticationError('gitlab', AuthenticationErrorReason.Forbidden, ex);
 			case 500: // Internal Server Error
@@ -932,7 +944,7 @@ $search: String!
 				}
 				break;
 			default:
-				if (ex.status >= 400 && ex.status < 500) throw new ProviderRequestClientError(ex);
+				if (ex.status >= 400 && ex.status < 500) throw new RequestClientError(ex);
 				break;
 		}
 

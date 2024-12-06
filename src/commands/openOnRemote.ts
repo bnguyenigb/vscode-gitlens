@@ -1,4 +1,5 @@
-import { Commands, GlyphChars } from '../constants';
+import { GlyphChars } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { createRevisionRange, shortenRevision } from '../git/models/reference';
 import type { GitRemote } from '../git/models/remote';
@@ -8,10 +9,10 @@ import { RemoteResourceType } from '../git/models/remoteResource';
 import type { RemoteProvider } from '../git/remotes/remoteProvider';
 import { showGenericErrorMessage } from '../messages';
 import { showRemoteProviderPicker } from '../quickpicks/remoteProviderPicker';
-import { ensure } from '../system/array';
-import { command } from '../system/command';
+import { ensureArray } from '../system/array';
 import { Logger } from '../system/logger';
 import { pad, splitSingle } from '../system/string';
+import { command } from '../system/vscode/command';
 import { Command } from './base';
 
 export type OpenOnRemoteCommandArgs =
@@ -87,7 +88,7 @@ export class OpenOnRemoteCommand extends Command {
 		}
 
 		try {
-			const resources = ensure(args.resource)!;
+			const resources = ensureArray(args.resource);
 			for (const resource of resources) {
 				await processResource.call(this, resource);
 			}
@@ -102,7 +103,7 @@ export class OpenOnRemoteCommand extends Command {
 			};
 
 			let title;
-			let placeHolder = `Choose which remote to ${
+			let placeholder = `Choose which remote to ${
 				args.clipboard ? `copy the link${resources.length > 1 ? 's' : ''} for` : 'open on'
 			}`;
 
@@ -152,7 +153,7 @@ export class OpenOnRemoteCommand extends Command {
 							? `Copy ${provider} Create Pull Request Links`
 							: `Create Pull Requests on ${provider}`;
 
-						placeHolder = `Choose which remote to ${
+						placeholder = `Choose which remote to ${
 							args.clipboard ? 'copy the create pull request links for' : 'create the pull requests on'
 						}`;
 					} else {
@@ -166,7 +167,7 @@ export class OpenOnRemoteCommand extends Command {
 								: resource.compare.branch
 						}`;
 
-						placeHolder = `Choose which remote to ${
+						placeholder = `Choose which remote to ${
 							args.clipboard ? 'copy the create pull request link for' : 'create the pull request on'
 						}`;
 					}
@@ -204,7 +205,7 @@ export class OpenOnRemoteCommand extends Command {
 				// }
 			}
 
-			const pick = await showRemoteProviderPicker(title, placeHolder, resources, remotes, options);
+			const pick = await showRemoteProviderPicker(title, placeholder, resources, remotes, options);
 			await pick?.execute();
 		} catch (ex) {
 			Logger.error(ex, 'OpenOnRemoteCommand');

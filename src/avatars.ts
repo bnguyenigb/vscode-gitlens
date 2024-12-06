@@ -1,14 +1,15 @@
-import { EventEmitter, Uri } from 'vscode';
 import { md5 } from '@env/crypto';
+import { EventEmitter, Uri } from 'vscode';
 import type { GravatarDefaultStyle } from './config';
-import type { StoredAvatar } from './constants';
+import type { StoredAvatar } from './constants.storage';
 import { Container } from './container';
+import type { CommitAuthor } from './git/models/author';
 import { getGitHubNoReplyAddressParts } from './git/remotes/github';
-import { configuration } from './system/configuration';
-import { getContext } from './system/context';
 import { debounce } from './system/function';
 import { filterMap } from './system/iterable';
 import { base64, equalsIgnoreCase } from './system/string';
+import { configuration } from './system/vscode/configuration';
+import { getContext } from './system/vscode/context';
 import type { ContactPresenceStatus } from './vsls/vsls';
 
 const maxSmallIntegerV8 = 2 ** 30 - 1; // Max number that can be stored in V8's smis (small integers)
@@ -125,7 +126,13 @@ function getAvatarUriCore(
 	const avatar = createOrUpdateAvatar(key, email, size, hash, options?.defaultStyle);
 	if (avatar.uri != null) return avatar.uri;
 
-	if (!options?.cached && repoPathOrCommit != null && getContext('gitlens:hasConnectedRemotes')) {
+	if (
+		!options?.cached &&
+		repoPathOrCommit != null &&
+		getContext('gitlens:repos:withHostingIntegrationsConnected')?.includes(
+			typeof repoPathOrCommit === 'string' ? repoPathOrCommit : repoPathOrCommit.repoPath,
+		)
+	) {
 		let query = avatarQueue.get(key);
 		if (query == null && hasAvatarExpired(avatar)) {
 			query = getAvatarUriFromRemoteProvider(avatar, key, email, repoPathOrCommit, { size: size }).then(
@@ -206,7 +213,7 @@ function getAvatarUriFromGitHubNoReplyAddress(email: string, size: number = 16):
 
 async function getAvatarUriFromRemoteProvider(
 	avatar: Avatar,
-	key: string,
+	_key: string,
 	email: string,
 	repoPathOrCommit: string | { ref: string; repoPath: string },
 	{ size = 16 }: { size?: number } = {},
@@ -214,7 +221,7 @@ async function getAvatarUriFromRemoteProvider(
 	ensureAvatarCache(avatarCache);
 
 	try {
-		let account;
+		let account: CommitAuthor | undefined;
 		// if (typeof repoPathOrCommit === 'string') {
 		// 	const remote = await Container.instance.git.getRichRemoteProvider(repoPathOrCommit);
 		// 	account = await remote?.provider.getAccountForEmail(email, { avatarSize: size });

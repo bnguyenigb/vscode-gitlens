@@ -1,7 +1,7 @@
 /*global window document*/
-import type { CustomEditorIds, WebviewIds, WebviewViewIds } from '../../../constants';
+import { ContextProvider } from '@lit/context';
+import type { CustomEditorIds, WebviewIds, WebviewViewIds } from '../../../constants.views';
 import { debounce } from '../../../system/function';
-import { Logger } from '../../../system/logger';
 import type { LogScope } from '../../../system/logger.scope';
 import type {
 	IpcCallParamsType,
@@ -11,15 +11,15 @@ import type {
 	IpcRequest,
 	WebviewFocusChangedParams,
 } from '../../protocol';
-import { WebviewFocusChangedCommand, WebviewReadyCommand } from '../../protocol';
+import { DidChangeWebviewFocusNotification, WebviewFocusChangedCommand, WebviewReadyCommand } from '../../protocol';
+import { ipcContext, loggerContext, LoggerContext, telemetryContext, TelemetryContext } from './context';
 import { DOM } from './dom';
 import type { Disposable } from './events';
 import type { HostIpcApi } from './ipc';
 import { getHostIpcApi, HostIpc } from './ipc';
+import { telemetryEventName } from './telemetry';
 import type { ThemeChangeEvent } from './theme';
 import { computeThemeColors, onDidChangeTheme, watchThemeColors } from './theme';
-
-declare const DEBUG: boolean;
 
 export abstract class App<
 	State extends { webviewId: CustomEditorIds | WebviewIds | WebviewViewIds; timestamp: number } = {
@@ -29,6 +29,8 @@ export abstract class App<
 > {
 	private readonly _api: HostIpcApi;
 	private readonly _hostIpc: HostIpc;
+	private readonly _logger: LoggerContext;
+	protected readonly _telemetry: TelemetryContext;
 
 	protected state: State;
 	protected readonly placement: 'editor' | 'view';
@@ -47,27 +49,25 @@ export abstract class App<
 
 		this.placement = (document.body.getAttribute('data-placement') ?? 'editor') as 'editor' | 'view';
 
-		Logger.configure(
-			{
-				name: appName,
-				createChannel: function (name: string) {
-					return {
-						name: name,
-						appendLine: function (value: string) {
-							console.log(`[${name}] ${value}`);
-						},
-					};
-				},
-			},
-			DEBUG ? 'debug' : 'off',
-		);
-
-		this.log(`${appName}()`);
-		// this.log(`ctor(${this.state ? JSON.stringify(this.state) : ''})`);
+		this._logger = new LoggerContext(appName);
+		this.log('opening...');
 
 		this._api = getHostIpcApi();
 		this._hostIpc = new HostIpc(this.appName);
 		disposables.push(this._hostIpc);
+
+		this._telemetry = new TelemetryContext(this._hostIpc);
+		disposables.push(this._telemetry);
+
+		new ContextProvider(document.body, { context: ipcContext, initialValue: this._hostIpc });
+		new ContextProvider(document.body, {
+			context: loggerContext,
+			initialValue: this._logger,
+		});
+		new ContextProvider(document.body, {
+			context: telemetryContext,
+			initialValue: this._telemetry,
+		});
 
 		if (this.state != null) {
 			const state = this.getState();
@@ -81,20 +81,34 @@ export abstract class App<
 		disposables.push(watchThemeColors());
 
 		requestAnimationFrame(() => {
-			this.log(`${appName}(): initializing...`);
+			this.log('initializing...');
 
 			try {
 				this.onInitialize?.();
 				this.bind();
 
 				if (this.onMessageReceived != null) {
-					disposables.push(this._hostIpc.onReceiveMessage(msg => this.onMessageReceived!(msg)));
+					disposables.push(
+						this._hostIpc.onReceiveMessage(msg => {
+							switch (true) {
+								case DidChangeWebviewFocusNotification.is(msg):
+									window.dispatchEvent(
+										new CustomEvent(msg.params.focused ? 'webview-focus' : 'webview-blur'),
+									);
+									break;
+
+								default:
+									this.onMessageReceived!(msg);
+							}
+						}),
+					);
 				}
 
 				this.sendCommand(WebviewReadyCommand, undefined);
 
 				this.onInitialized?.();
 			} finally {
+				this.log('initialized');
 				if (document.body.classList.contains('preload')) {
 					setTimeout(() => {
 						document.body.classList.remove('preload');
@@ -110,6 +124,14 @@ export abstract class App<
 				this.bindDisposables = undefined;
 			}),
 		);
+
+		disposables.push(
+			DOM.on(window, telemetryEventName, e => {
+				this._telemetry.sendEvent(e.detail);
+			}),
+		);
+
+		this.log('opened');
 	}
 
 	protected onInitialize?(): void;
@@ -123,6 +145,12 @@ export abstract class App<
 
 	private bindDisposables: Disposable[] | undefined;
 	protected bind() {
+		document.querySelectorAll('a').forEach(a => {
+			if (a.href === a.title) {
+				a.removeAttribute('title');
+			}
+		});
+
 		this.bindDisposables?.forEach(d => d.dispose());
 		this.bindDisposables = this.onBind?.();
 		if (this.bindDisposables == null) {
@@ -157,11 +185,7 @@ export abstract class App<
 	protected log(message: string, ...optionalParams: any[]): void;
 	protected log(scope: LogScope | undefined, message: string, ...optionalParams: any[]): void;
 	protected log(scopeOrMessage: LogScope | string | undefined, ...optionalParams: any[]): void {
-		if (typeof scopeOrMessage === 'string') {
-			Logger.log(scopeOrMessage, ...optionalParams);
-		} else {
-			Logger.log(scopeOrMessage, optionalParams.shift(), ...optionalParams);
-		}
+		this._logger.log(scopeOrMessage, ...optionalParams);
 	}
 
 	protected getState(): State | undefined {

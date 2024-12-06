@@ -1,6 +1,6 @@
 import type { Uri } from 'vscode';
 import { window } from 'vscode';
-import { Commands } from '../../constants';
+import { Commands } from '../../constants.commands';
 import type { Container } from '../../container';
 import { create as createWorktree, open as openWorktree } from '../../git/actions/worktree';
 import { getLocalBranchByUpstream } from '../../git/models/branch';
@@ -9,9 +9,9 @@ import { createReference, getReferenceFromBranch } from '../../git/models/refere
 import type { GitRemote } from '../../git/models/remote';
 import { getWorktreeForBranch } from '../../git/models/worktree';
 import { parseGitRemoteUrl } from '../../git/parsers/remoteParser';
-import { command } from '../../system/command';
 import { Logger } from '../../system/logger';
 import { waitUntilNextTick } from '../../system/promise';
+import { command } from '../../system/vscode/command';
 import { Command } from '../base';
 
 interface GHPRPullRequestNode {
@@ -86,7 +86,7 @@ export class OpenOrCreateWorktreeCommand extends Command {
 		const remoteUrl = remoteUri.toString();
 		const [, remoteDomain, remotePath] = parseGitRemoteUrl(remoteUrl);
 
-		const remotes = await repo.getRemotes({ filter: r => r.matches(remoteDomain, remotePath) });
+		const remotes = await repo.git.getRemotes({ filter: r => r.matches(remoteDomain, remotePath) });
 		const remote = remotes[0] as GitRemote | undefined;
 
 		let addRemote: { name: string; url: string } | undefined;

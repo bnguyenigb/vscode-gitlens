@@ -2,16 +2,16 @@ import type { SourceControlResourceState } from 'vscode';
 import { env, Uri, window } from 'vscode';
 import type { ScmResource } from '../@types/vscode.git.resources';
 import { ScmResourceGroupType, ScmStatus } from '../@types/vscode.git.resources.enums';
-import { Commands } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { GitUri } from '../git/gitUri';
 import { isUncommitted } from '../git/models/reference';
 import { showGenericErrorMessage } from '../messages';
 import { getRepositoryOrShowPicker } from '../quickpicks/repositoryPicker';
 import { filterMap } from '../system/array';
-import { command } from '../system/command';
-import { configuration } from '../system/configuration';
 import { Logger } from '../system/logger';
+import { command } from '../system/vscode/command';
+import { configuration } from '../system/vscode/configuration';
 import type { CommandContext } from './base';
 import { Command, isCommandContextViewNodeHasFileCommit, isCommandContextViewNodeHasFileRefs } from './base';
 
@@ -88,7 +88,7 @@ export class ExternalDiffCommand extends Command {
 				const repository = await getRepositoryOrShowPicker('Open All Changes (difftool)');
 				if (repository == null) return undefined;
 
-				const status = await this.container.git.getStatusForRepo(repository.uri);
+				const status = await this.container.git.getStatus(repository.uri);
 				if (status == null) {
 					return window.showInformationMessage("The repository doesn't have any changes");
 				}

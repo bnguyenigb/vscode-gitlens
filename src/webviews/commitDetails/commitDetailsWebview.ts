@@ -1,16 +1,23 @@
+import { EntityIdentifierUtils } from '@gitkraken/provider-apis';
 import type { CancellationToken, ConfigurationChangeEvent, TextDocumentShowOptions } from 'vscode';
-import { CancellationTokenSource, Disposable, Uri, window } from 'vscode';
-import type { MaybeEnrichedAutolink } from '../../annotations/autolinks';
-import { serializeAutolink } from '../../annotations/autolinks';
+import { CancellationTokenSource, Disposable, env, Uri, window } from 'vscode';
+import type { MaybeEnrichedAutolink } from '../../autolinks';
+import { serializeAutolink } from '../../autolinks';
+import { getAvatarUri } from '../../avatars';
+import type { CopyMessageToClipboardCommandArgs } from '../../commands/copyMessageToClipboard';
 import type { CopyShaToClipboardCommandArgs } from '../../commands/copyShaToClipboard';
-import type { ContextKeys } from '../../constants';
-import { Commands } from '../../constants';
+import type { OpenPullRequestOnRemoteCommandArgs } from '../../commands/openPullRequestOnRemote';
+import { Commands } from '../../constants.commands';
+import type { ContextKeys } from '../../constants.context';
+import { IssueIntegrationId } from '../../constants.integrations';
+import type { InspectTelemetryContext, Sources } from '../../constants.telemetry';
 import type { Container } from '../../container';
 import type { CommitSelectedEvent } from '../../eventBus';
 import { executeGitCommand } from '../../git/actions';
 import {
 	openChanges,
 	openChangesWithWorking,
+	openComparisonChanges,
 	openFile,
 	openFileOnRemote,
 	showDetailsQuickPick,
@@ -19,25 +26,27 @@ import * as RepoActions from '../../git/actions/repository';
 import { CommitFormatter } from '../../git/formatters/commitFormatter';
 import type { GitBranch } from '../../git/models/branch';
 import type { GitCommit } from '../../git/models/commit';
-import { isCommit } from '../../git/models/commit';
-import { uncommitted } from '../../git/models/constants';
+import { isCommit, isStash } from '../../git/models/commit';
+import { uncommitted, uncommittedStaged } from '../../git/models/constants';
 import type { GitFileChange, GitFileChangeShape } from '../../git/models/file';
 import type { IssueOrPullRequest } from '../../git/models/issue';
 import { serializeIssueOrPullRequest } from '../../git/models/issue';
 import type { PullRequest } from '../../git/models/pullRequest';
-import { serializePullRequest } from '../../git/models/pullRequest';
+import { getComparisonRefsForPullRequest, serializePullRequest } from '../../git/models/pullRequest';
 import type { GitRevisionReference } from '../../git/models/reference';
 import { createReference, getReferenceFromRevision, shortenRevision } from '../../git/models/reference';
 import type { GitRemote } from '../../git/models/remote';
 import type { Repository } from '../../git/models/repository';
 import { RepositoryChange, RepositoryChangeComparisonMode } from '../../git/models/repository';
+import type { CreateDraftChange, Draft, DraftVisibility } from '../../gk/models/drafts';
 import { showPatchesView } from '../../plus/drafts/actions';
+import type { Subscription } from '../../plus/gk/account/subscription';
+import type { SubscriptionChangeEvent } from '../../plus/gk/account/subscriptionService';
+import type { ConnectionStateChangeEvent } from '../../plus/integrations/integrationService';
+import { getEntityIdentifierInput } from '../../plus/integrations/providers/utils';
+import { confirmDraftStorage, ensureAccount } from '../../plus/utils';
 import type { ShowInCommitGraphCommandArgs } from '../../plus/webviews/graph/protocol';
 import type { Change } from '../../plus/webviews/patchDetails/protocol';
-import { pauseOnCancelOrTimeoutMapTuplePromise } from '../../system/cancellation';
-import { executeCommand, executeCoreCommand, executeCoreGitCommand, registerCommand } from '../../system/command';
-import { configuration } from '../../system/configuration';
-import { getContext, onDidChangeContext } from '../../system/context';
 import { debug } from '../../system/decorators/log';
 import type { Deferrable } from '../../system/function';
 import { debounce } from '../../system/function';
@@ -45,9 +54,17 @@ import { filterMap, map } from '../../system/iterable';
 import { Logger } from '../../system/logger';
 import { getLogScope } from '../../system/logger.scope';
 import { MRU } from '../../system/mru';
-import { getSettledValue } from '../../system/promise';
-import type { Serialized } from '../../system/serialize';
-import { serialize } from '../../system/serialize';
+import { getSettledValue, pauseOnCancelOrTimeoutMapTuplePromise } from '../../system/promise';
+import {
+	executeCommand,
+	executeCoreCommand,
+	executeCoreGitCommand,
+	registerCommand,
+} from '../../system/vscode/command';
+import { configuration } from '../../system/vscode/configuration';
+import { getContext, onDidChangeContext } from '../../system/vscode/context';
+import type { Serialized } from '../../system/vscode/serialize';
+import { serialize } from '../../system/vscode/serialize';
 import type { LinesChangeEvent } from '../../trackers/lineTracker';
 import type { IpcCallMessageType, IpcMessage } from '../protocol';
 import { updatePendingContext } from '../webviewController';
@@ -59,38 +76,51 @@ import type {
 	CreatePatchFromWipParams,
 	DidChangeWipStateParams,
 	DidExplainParams,
+	DidGenerateParams,
 	ExecuteFileActionParams,
 	GitBranchShape,
 	Mode,
 	Preferences,
+	ShowWipArgs,
 	State,
+	SuggestChangesParams,
 	SwitchModeParams,
 	UpdateablePreferences,
 	Wip,
 	WipChange,
 } from './protocol';
 import {
-	AutolinkSettingsCommand,
+	ChangeReviewModeCommand,
 	CreatePatchFromWipCommand,
+	DidChangeConnectedJiraNotification,
+	DidChangeDraftStateNotification,
+	DidChangeHasAccountNotification,
 	DidChangeNotification,
 	DidChangeWipStateNotification,
 	ExecuteCommitActionCommand,
 	ExecuteFileActionCommand,
 	ExplainRequest,
 	FetchCommand,
+	GenerateRequest,
 	messageHeadlineSplitterToken,
 	NavigateCommand,
 	OpenFileCommand,
 	OpenFileComparePreviousCommand,
 	OpenFileCompareWorkingCommand,
 	OpenFileOnRemoteCommand,
+	OpenPullRequestChangesCommand,
+	OpenPullRequestComparisonCommand,
+	OpenPullRequestDetailsCommand,
+	OpenPullRequestOnRemoteCommand,
 	PickCommitCommand,
 	PinCommand,
 	PublishCommand,
 	PullCommand,
 	PushCommand,
 	SearchCommitCommand,
+	ShowCodeSuggestionCommand,
 	StageFileCommand,
+	SuggestChangesCommand,
 	SwitchCommand,
 	SwitchModeCommand,
 	UnstageFileCommand,
@@ -100,10 +130,14 @@ import type { CommitDetailsWebviewShowingArgs } from './registration';
 
 type RepositorySubscription = { repo: Repository; subscription: Disposable };
 
-interface WipContext extends Wip {
+// interface WipContext extends Wip
+interface WipContext {
+	changes: WipChange | undefined;
+	repositoryCount: number;
 	branch?: GitBranch;
 	pullRequest?: PullRequest;
 	repo: Repository;
+	codeSuggestions?: Draft[];
 }
 
 interface Context {
@@ -122,7 +156,11 @@ interface Context {
 	autolinkedIssues: IssueOrPullRequest[] | undefined;
 	pullRequest: PullRequest | undefined;
 	wip: WipContext | undefined;
+	inReview: boolean;
 	orgSettings: State['orgSettings'];
+	source?: Sources;
+	hasConnectedJira: boolean | undefined;
+	hasAccount: boolean | undefined;
 }
 
 export class CommitDetailsWebviewProvider
@@ -145,6 +183,7 @@ export class CommitDetailsWebviewProvider
 	) {
 		this._context = {
 			mode: 'commit',
+			inReview: false,
 			navigationStack: {
 				count: 0,
 				position: 0,
@@ -159,11 +198,15 @@ export class CommitDetailsWebviewProvider
 			pullRequest: undefined,
 			wip: undefined,
 			orgSettings: this.getOrgSettings(),
+			hasConnectedJira: undefined,
+			hasAccount: undefined,
 		};
 
 		this._disposable = Disposable.from(
 			configuration.onDidChangeAny(this.onAnyConfigurationChanged, this),
 			onDidChangeContext(this.onContextChanged, this),
+			this.container.subscription.onDidChange(this.onSubscriptionChanged, this),
+			container.integrations.onDidChangeConnectionState(this.onIntegrationConnectionStateChanged, this),
 		);
 	}
 
@@ -175,16 +218,94 @@ export class CommitDetailsWebviewProvider
 		this._wipSubscription?.subscription.dispose();
 	}
 
+	getTelemetryContext(): InspectTelemetryContext {
+		let context: InspectTelemetryContext;
+		if (this.mode === 'wip') {
+			const repo = this._context.wip?.repo;
+			context = {
+				...this.host.getTelemetryContext(),
+				'context.attachedTo': this.options.attachedTo,
+				'context.mode': this.mode,
+				'context.autolinks': this._context.wip?.pullRequest != null ? 1 : 0,
+				'context.inReview': this._context.inReview,
+				'context.codeSuggestions': this._context.wip?.codeSuggestions?.length ?? 0,
+				'context.repository.id': repo?.idHash,
+				'context.repository.scheme': repo?.uri.scheme,
+				'context.repository.closed': repo?.closed,
+				'context.repository.folder.scheme': repo?.folder?.uri.scheme,
+				'context.repository.provider.id': repo?.provider.id,
+			};
+		} else {
+			context = {
+				...this.host.getTelemetryContext(),
+				'context.attachedTo': this.options.attachedTo,
+				'context.mode': this.mode,
+				'context.autolinks':
+					(this._context.pullRequest != null ? 1 : 0) + (this._context.autolinkedIssues?.length ?? 0),
+				'context.pinned': this._context.pinned,
+				'context.type':
+					this._context.commit == null ? undefined : isStash(this._context.commit) ? 'stash' : 'commit',
+				'context.uncommitted': this._context.commit?.isUncommitted ?? false,
+			};
+		}
+
+		return context;
+	}
+
 	private _skipNextRefreshOnVisibilityChange = false;
+	private _shouldRefreshPullRequestDetails = false;
 
 	async onShowing(
 		_loading: boolean,
 		options?: WebviewShowOptions,
 		...args: WebviewShowingArgs<CommitDetailsWebviewShowingArgs, Serialized<State>>
+	): Promise<[boolean, InspectTelemetryContext]> {
+		const [arg] = args;
+		if ((arg as ShowWipArgs)?.type === 'wip') {
+			return [await this.onShowingWip(arg as ShowWipArgs), this.getTelemetryContext()];
+		}
+
+		return [
+			await this.onShowingCommit(arg as Partial<CommitSelectedEvent['data']> | undefined, options),
+			this.getTelemetryContext(),
+		];
+	}
+
+	private get inReview(): boolean {
+		return this._pendingContext?.inReview ?? this._context.inReview;
+	}
+
+	async onShowingWip(arg: ShowWipArgs, options?: WebviewShowOptions): Promise<boolean> {
+		this.updatePendingContext({ source: arg.source });
+		const shouldChangeReview = arg.inReview != null && this.inReview !== arg.inReview;
+		if (this.mode !== 'wip' || (arg.repository != null && this._context.wip?.repo !== arg.repository)) {
+			if (shouldChangeReview) {
+				this.updatePendingContext({ inReview: arg.inReview });
+			}
+			await this.setMode('wip', arg.repository);
+			if (shouldChangeReview && arg.inReview === true) {
+				void this.trackOpenReviewMode(arg.source);
+			}
+		} else if (shouldChangeReview) {
+			await this.setInReview(arg.inReview!, arg.source);
+		}
+
+		if (options?.preserveVisibility && !this.host.visible) return false;
+
+		if (arg.source === 'launchpad' && this.host.visible) {
+			this._shouldRefreshPullRequestDetails = true;
+			this.onRefresh();
+		}
+
+		return true;
+	}
+
+	async onShowingCommit(
+		arg: Partial<CommitSelectedEvent['data']> | undefined,
+		options?: WebviewShowOptions,
 	): Promise<boolean> {
 		let data: Partial<CommitSelectedEvent['data']> | undefined;
 
-		const [arg] = args;
 		if (isSerializedState<Serialized<State>>(arg)) {
 			const { commit: selected } = arg.state;
 			if (selected?.repoPath != null && selected?.sha != null) {
@@ -206,7 +327,7 @@ export class CommitDetailsWebviewProvider
 				}
 			}
 		} else if (arg != null && typeof arg === 'object') {
-			data = arg as Partial<CommitSelectedEvent['data']> | undefined;
+			data = arg;
 		} else {
 			data = undefined;
 		}
@@ -224,7 +345,7 @@ export class CommitDetailsWebviewProvider
 		}
 
 		if (commit != null && this.mode === 'wip' && data?.interaction !== 'passive') {
-			this.setMode('commit');
+			await this.setMode('commit');
 		}
 
 		if (commit == null) {
@@ -241,6 +362,22 @@ export class CommitDetailsWebviewProvider
 
 		this._skipNextRefreshOnVisibilityChange = true;
 		return true;
+	}
+
+	async trackOpenReviewMode(source?: Sources) {
+		if (this._context.wip?.pullRequest == null) return;
+
+		const provider = this._context.wip.pullRequest.provider.id;
+		const repoPrivacy = await this.container.git.visibility(this._context.wip.repo.path);
+		const filesChanged = this._context.wip.changes?.files.length ?? 0;
+
+		this.container.telemetry.sendEvent('openReviewMode', {
+			provider: provider,
+			'repository.visibility': repoPrivacy,
+			repoPrivacy: repoPrivacy,
+			source: source ?? 'inspect',
+			filesChanged: filesChanged,
+		});
 	}
 
 	includeBootstrap(): Promise<Serialized<State>> {
@@ -323,12 +460,21 @@ export class CommitDetailsWebviewProvider
 						break;
 
 					case 'sha':
-						if (e.params.alt) {
-							this.showCommitPicker();
-						} else if (this._context.commit != null) {
-							void executeCommand<CopyShaToClipboardCommandArgs>(Commands.CopyShaToClipboard, {
-								sha: this._context.commit.sha,
-							});
+						if (this._context.commit != null) {
+							if (e.params.alt) {
+								void executeCommand<CopyMessageToClipboardCommandArgs>(
+									Commands.CopyMessageToClipboard,
+									{
+										message: this._context.commit.message,
+									},
+								);
+							} else if (isStash(this._context.commit)) {
+								void env.clipboard.writeText(this._context.commit.stashName);
+							} else {
+								void executeCommand<CopyShaToClipboardCommandArgs>(Commands.CopyShaToClipboard, {
+									sha: this._context.commit.sha,
+								});
+							}
 						}
 						break;
 				}
@@ -346,10 +492,6 @@ export class CommitDetailsWebviewProvider
 				this.switchMode(e.params);
 				break;
 
-			case AutolinkSettingsCommand.is(e):
-				this.showAutolinkSettings();
-				break;
-
 			case PinCommand.is(e):
 				this.updatePinned(e.params.pin ?? false, true);
 				break;
@@ -364,6 +506,10 @@ export class CommitDetailsWebviewProvider
 
 			case ExplainRequest.is(e):
 				void this.explainRequest(ExplainRequest, e);
+				break;
+
+			case GenerateRequest.is(e):
+				void this.generateRequest(GenerateRequest, e);
 				break;
 
 			case StageFileCommand.is(e):
@@ -397,6 +543,164 @@ export class CommitDetailsWebviewProvider
 			case SwitchCommand.is(e):
 				this.switch();
 				break;
+			case SuggestChangesCommand.is(e):
+				void this.suggestChanges(e.params);
+				break;
+			case ShowCodeSuggestionCommand.is(e):
+				this.showCodeSuggestion(e.params.id);
+				break;
+			case ChangeReviewModeCommand.is(e):
+				void this.setInReview(e.params.inReview, 'inspect-overview');
+				break;
+			case OpenPullRequestChangesCommand.is(e):
+				void this.openPullRequestChanges();
+				break;
+			case OpenPullRequestComparisonCommand.is(e):
+				void this.openPullRequestComparison();
+				break;
+			case OpenPullRequestOnRemoteCommand.is(e):
+				void this.openPullRequestOnRemote();
+				break;
+			case OpenPullRequestDetailsCommand.is(e):
+				void this.showPullRequestDetails();
+				break;
+		}
+	}
+
+	private getEncodedEntityid(pullRequest = this._context.wip?.pullRequest): string | undefined {
+		if (pullRequest == null) return undefined;
+
+		const entity = getEntityIdentifierInput(pullRequest);
+		if (entity == null) return undefined;
+
+		return EntityIdentifierUtils.encode(entity);
+	}
+
+	private async trackCreateCodeSuggestion(draft: Draft, fileCount: number) {
+		if (this._context.wip?.pullRequest == null) return;
+
+		const provider = this._context.wip.pullRequest.provider.id;
+		const repoPrivacy = await this.container.git.visibility(this._context.wip.repo.path);
+
+		this.container.telemetry.sendEvent(
+			'codeSuggestionCreated',
+			{
+				provider: provider,
+				'repository.visibility': repoPrivacy,
+				repoPrivacy: repoPrivacy,
+				draftId: draft.id,
+				draftPrivacy: draft.visibility,
+				filesChanged: fileCount,
+				source: 'reviewMode',
+			},
+			{
+				source: 'inspect-overview',
+				detail: { reviewMode: true },
+			},
+		);
+	}
+
+	private async suggestChanges(e: SuggestChangesParams) {
+		if (
+			!(await ensureAccount(this.container, 'Code Suggestions are a Preview feature and require an account.', {
+				source: 'code-suggest',
+				detail: 'create',
+			})) ||
+			!(await confirmDraftStorage(this.container))
+		) {
+			return;
+		}
+
+		const createChanges: CreateDraftChange[] = [];
+
+		const changes = Object.entries(e.changesets);
+		const ignoreChecked = changes.length === 1;
+		let createFileCount = 0;
+
+		for (const [_, change] of changes) {
+			if (!ignoreChecked && change.checked === false) continue;
+
+			// we only support a single repo for now
+			const repository =
+				this._context.wip!.repo.id === change.repository.path ? this._context.wip!.repo : undefined;
+			if (repository == null) continue;
+
+			const { checked } = change;
+			let changeRevision = { to: uncommitted, from: 'HEAD' };
+			if (checked === 'staged') {
+				changeRevision = { ...changeRevision, to: uncommittedStaged };
+			}
+
+			const prEntityId = this.getEncodedEntityid();
+			if (prEntityId == null) continue;
+
+			if (change.files && change.files.length > 0) {
+				if (checked === 'staged') {
+					createFileCount += change.files.filter(f => f.staged === true).length;
+				} else {
+					createFileCount += change.files.length;
+				}
+			}
+
+			createChanges.push({
+				repository: repository,
+				revision: changeRevision,
+				prEntityId: prEntityId,
+			});
+		}
+
+		if (createChanges.length === 0) return;
+
+		try {
+			const entityIdentifier = getEntityIdentifierInput(this._context.wip!.pullRequest!);
+			const prEntityId = EntityIdentifierUtils.encode(entityIdentifier);
+
+			const options = {
+				description: e.description,
+				visibility: 'provider_access' as DraftVisibility,
+				prEntityId: prEntityId,
+			};
+
+			const draft = await this.container.drafts.createDraft(
+				'suggested_pr_change',
+				e.title,
+				createChanges,
+				options,
+			);
+
+			async function showNotification() {
+				const view = { title: 'View Code Suggestions' };
+				const copy = { title: 'Copy Link' };
+				let copied = false;
+				while (true) {
+					const result = await window.showInformationMessage(
+						`Code Suggestion successfully created${copied ? '\u2014 link copied to the clipboard' : ''}`,
+						view,
+						copy,
+					);
+
+					if (result === copy) {
+						void env.clipboard.writeText(draft.deepLinkUrl);
+						copied = true;
+						continue;
+					}
+
+					if (result === view) {
+						void showPatchesView({ mode: 'view', draft: draft, source: 'notification' });
+					}
+
+					break;
+				}
+			}
+
+			void showNotification();
+			void this.setInReview(false);
+
+			void this.trackCreateCodeSuggestion(draft, createFileCount);
+		} catch (ex) {
+			debugger;
+
+			void window.showErrorMessage(`Unable to create draft: ${ex.message}`);
 		}
 	}
 
@@ -435,6 +739,77 @@ export class CommitDetailsWebviewProvider
 		const path = this.getRepoActionPath();
 		if (path == null) return;
 		void RepoActions.switchTo(path);
+	}
+
+	private get pullRequestContext():
+		| { pr: PullRequest; repoPath: string; branch?: GitBranch; commit?: GitCommit }
+		| undefined {
+		if (this.mode === 'wip') {
+			if (this._context.wip?.pullRequest == null) return;
+
+			return {
+				repoPath: this._context.wip.repo.path,
+				branch: this._context.wip.branch,
+				pr: this._context.wip.pullRequest,
+			};
+		}
+
+		if (this._context.pullRequest == null) return;
+
+		return {
+			repoPath: this._context.commit!.repoPath,
+			commit: this._context.commit!,
+			pr: this._context.pullRequest,
+		};
+	}
+
+	private openPullRequestChanges() {
+		if (this.pullRequestContext == null) return;
+
+		const { repoPath, pr } = this.pullRequestContext;
+		if (pr.refs == null) return;
+
+		const refs = getComparisonRefsForPullRequest(repoPath, pr.refs);
+		return openComparisonChanges(
+			this.container,
+			{
+				repoPath: refs.repoPath,
+				lhs: refs.base.ref,
+				rhs: refs.head.ref,
+			},
+			{ title: `Changes in Pull Request #${pr.id}` },
+		);
+	}
+
+	private openPullRequestComparison() {
+		if (this.pullRequestContext == null) return;
+
+		const { repoPath, pr } = this.pullRequestContext;
+		if (pr.refs == null) return;
+
+		const refs = getComparisonRefsForPullRequest(repoPath, pr.refs);
+		return this.container.views.searchAndCompare.compare(refs.repoPath, refs.head, refs.base);
+	}
+
+	private async openPullRequestOnRemote(clipboard?: boolean) {
+		if (this.pullRequestContext == null) return;
+
+		const {
+			pr: { url },
+		} = this.pullRequestContext;
+		return executeCommand<OpenPullRequestOnRemoteCommandArgs, void>(Commands.OpenPullRequestOnRemote, {
+			pr: { url: url },
+			clipboard: clipboard,
+		});
+	}
+
+	private async showPullRequestDetails() {
+		if (this.pullRequestContext == null) return;
+
+		const { pr, repoPath, branch, commit } = this.pullRequestContext;
+		if (pr == null) return;
+
+		return this.container.views.pullRequest.showPullRequest(pr, commit ?? branch ?? repoPath);
 	}
 
 	onRefresh(_force?: boolean | undefined): void {
@@ -509,9 +884,56 @@ export class CommitDetailsWebviewProvider
 		}
 	}
 
+	private onSubscriptionChanged(e: SubscriptionChangeEvent) {
+		void this.updateCodeSuggestions();
+		this.updateHasAccount(e.current);
+	}
+
+	updateHasAccount(subscription: Subscription) {
+		const hasAccount = subscription.account != null;
+		if (this._context.hasAccount === hasAccount) return;
+
+		this._context.hasAccount = hasAccount;
+		void this.host.notify(DidChangeHasAccountNotification, { hasAccount: hasAccount });
+	}
+
+	onIntegrationConnectionStateChanged(e: ConnectionStateChangeEvent) {
+		if (e.key === 'jira') {
+			const hasConnectedJira = e.reason === 'connected';
+			if (this._context.hasConnectedJira === hasConnectedJira) return;
+
+			this._context.hasConnectedJira = hasConnectedJira;
+			void this.host.notify(DidChangeConnectedJiraNotification, {
+				hasConnectedJira: this._context.hasConnectedJira,
+			});
+		}
+	}
+
+	async getHasJiraConnection(force = false): Promise<boolean> {
+		if (this._context.hasConnectedJira != null && !force) return this._context.hasConnectedJira;
+
+		const jira = await this.container.integrations.get(IssueIntegrationId.Jira);
+		if (jira == null) {
+			this._context.hasConnectedJira = false;
+		} else {
+			this._context.hasConnectedJira = jira.maybeConnected ?? (await jira.isConnected());
+		}
+
+		return this._context.hasConnectedJira;
+	}
+
+	async getHasAccount(force = false): Promise<boolean> {
+		if (this._context.hasAccount != null && !force) return this._context.hasAccount;
+
+		this._context.hasAccount = (await this.container.subscription.getSubscription())?.account != null;
+
+		return this._context.hasAccount;
+	}
+
 	private getPreferences(): Preferences {
 		return {
 			autolinksExpanded: this.container.storage.getWorkspace('views:commitDetails:autolinksExpanded') ?? true,
+			pullRequestExpanded: this.container.storage.getWorkspace('views:commitDetails:pullRequestExpanded') ?? true,
 			avatars: configuration.get('views.commitDetails.avatars'),
 			dateFormat: configuration.get('defaultDateFormat') ?? 'MMMM Do, YYYY h:mma',
 			dateStyle: configuration.get('defaultDateStyle') ?? 'relative',
@@ -521,7 +943,7 @@ export class CommitDetailsWebviewProvider
 		};
 	}
 
-	private onContextChanged(key: ContextKeys) {
+	private onContextChanged(key: keyof ContextKeys) {
 		if (['gitlens:gk:organization:ai:enabled', 'gitlens:gk:organization:drafts:enabled'].includes(key)) {
 			this.updatePendingContext({ orgSettings: this.getOrgSettings() });
 			this.updateState();
@@ -530,8 +952,8 @@ export class CommitDetailsWebviewProvider
 
 	private getOrgSettings(): State['orgSettings'] {
 		return {
-			ai: getContext<boolean>('gitlens:gk:organization:ai:enabled', false),
-			drafts: getContext<boolean>('gitlens:gk:organization:drafts:enabled', false),
+			ai: getContext('gitlens:gk:organization:ai:enabled', false),
+			drafts: getContext('gitlens:gk:organization:drafts:enabled', false),
 		};
 	}
 
@@ -541,6 +963,31 @@ export class CommitDetailsWebviewProvider
 			(this.options.attachedTo === 'graph' && e.source !== 'gitlens.views.graph') ||
 			(this.options.attachedTo === 'default' && e.source === 'gitlens.views.graph')
 		) {
+			return;
+		}
+
+		if (this.options.attachedTo === 'graph' /*|| e.source === 'gitlens.graph'*/) {
+			if (e.data.commit.ref === uncommitted) {
+				if (this.mode !== 'wip') {
+					void this.setMode('wip', this.container.git.getRepository(e.data.commit.repoPath));
+				} else if (e.data.commit.repoPath !== this._context.wip?.changes?.repository.path) {
+					void this.updateWipState(this.container.git.getRepository(e.data.commit.repoPath));
+				}
+			} else {
+				if (this._pinned && e.data.interaction === 'passive') {
+					this._commitStack.insert(getReferenceFromRevision(e.data.commit));
+					this.updateNavigation();
+				}
+
+				if (this.mode !== 'commit') {
+					void this.setMode('commit', this.container.git.getRepository(e.data.commit.repoPath));
+				}
+
+				if (!this._pinned || e.data.interaction !== 'passive') {
+					void this.host.show(false, { preserveFocus: e.data.preserveFocus }, e.data);
+				}
+			}
+
 			return;
 		}
 
@@ -613,6 +1060,13 @@ export class CommitDetailsWebviewProvider
 		void showPatchesView({ mode: 'create', create: { changes: [change] } });
 	}
 
+	private showCodeSuggestion(id: string) {
+		const draft = this._context.wip?.codeSuggestions?.find(draft => draft.id === id);
+		if (draft == null) return;
+
+		void showPatchesView({ mode: 'view', draft: draft, source: 'inspect' });
+	}
+
 	private onActiveEditorLinesChanged(e: LinesChangeEvent) {
 		if (e.pending || e.editor == null || e.suspended) return;
 
@@ -634,15 +1088,12 @@ export class CommitDetailsWebviewProvider
 		return this._pendingContext?.mode ?? this._context.mode;
 	}
 
-	private setMode(mode: Mode, repository?: Repository) {
+	private async setMode(mode: Mode, repository?: Repository): Promise<void> {
 		this.updatePendingContext({ mode: mode });
 		if (mode === 'commit') {
-			this._wipSubscription?.subscription.dispose();
-			this._wipSubscription = undefined;
-
 			this.updateState(true);
 		} else {
-			void this.updateWipState(repository ?? this.container.git.getBestRepositoryOrFirst());
+			await this.updateWipState(repository ?? this.container.git.getBestRepositoryOrFirst());
 		}
 
 		this.updateTitle();
@@ -653,31 +1104,72 @@ export class CommitDetailsWebviewProvider
 			if (this._context.commit == null) {
 				this.host.title = this.host.originalTitle;
 			} else {
-				let following = 'Commit';
+				let following = 'Commit Details';
 				if (this._context.commit.refType === 'stash') {
-					following = 'Stash';
+					following = 'Stash Details';
 				} else if (this._context.commit.isUncommitted) {
-					following = 'Uncommitted';
+					following = 'Uncommitted Changes';
 				}
 
 				this.host.title = `${this.host.originalTitle}: ${following}`;
 			}
 		} else {
-			this.host.title = `${this.host.originalTitle}: Repo Status`;
+			this.host.title = `${this.host.originalTitle}: Overview`;
 		}
 	}
 
 	private async explainRequest<T extends typeof ExplainRequest>(requestType: T, msg: IpcCallMessageType<T>) {
 		let params: DidExplainParams;
 		try {
-			const summary = await (
+			const result = await (
 				await this.container.ai
-			)?.explainCommit(this._context.commit!, {
-				progress: { location: { viewId: this.host.id } },
-			});
-			if (summary == null) throw new Error('Error retrieving content');
+			)?.explainCommit(
+				this._context.commit!,
+				{ source: 'inspect', type: isStash(this._context.commit) ? 'stash' : 'commit' },
+				{ progress: { location: { viewId: this.host.id } } },
+			);
+			if (result == null) throw new Error('Error retrieving content');
 
-			params = { summary: summary };
+			params = { result: result };
+		} catch (ex) {
+			debugger;
+			params = { error: { message: ex.message } };
+		}
+
+		void this.host.respond(requestType, msg, params);
+	}
+
+	private async generateRequest<T extends typeof GenerateRequest>(requestType: T, msg: IpcCallMessageType<T>) {
+		const repo: Repository | undefined = this._context.wip?.repo;
+
+		if (!repo) {
+			void this.host.respond(requestType, msg, { error: { message: 'Unable to find changes' } });
+			return;
+		}
+
+		let params: DidGenerateParams;
+
+		try {
+			// TODO@eamodio HACK -- only works for the first patch
+			// const patch = await this.getDraftPatch(this._context.draft);
+			// if (patch == null) throw new Error('Unable to find patch');
+
+			// const commit = await this.getOrCreateCommitForPatch(patch.gkRepositoryId);
+			// if (commit == null) throw new Error('Unable to find commit');
+
+			const message = await (
+				await this.container.ai
+			)?.generateDraftMessage(
+				repo,
+				{ source: 'inspect', type: 'suggested_pr_change' },
+				{ progress: { location: { viewId: this.host.id } } },
+			);
+			if (message == null) throw new Error('Error retrieving content');
+
+			params = {
+				title: message.summary,
+				description: message.body,
+			};
 		} catch (ex) {
 			debugger;
 			params = { error: { message: ex.message } };
@@ -717,6 +1209,26 @@ export class CommitDetailsWebviewProvider
 			}
 		}
 
+		const wip = current.wip;
+		if (wip == null && this._repositorySubscription) {
+			if (this._cancellationTokenSource == null) {
+				this._cancellationTokenSource = new CancellationTokenSource();
+			}
+			const cancellation = this._cancellationTokenSource.token;
+			setTimeout(() => {
+				if (cancellation.isCancellationRequested) return;
+				void this.updateWipState(this._repositorySubscription?.repo);
+			}, 100);
+		}
+
+		if (current.hasConnectedJira == null) {
+			current.hasConnectedJira = await this.getHasJiraConnection();
+		}
+
+		if (current.hasAccount == null) {
+			current.hasAccount = await this.getHasAccount();
+		}
+
 		const state = serialize<State>({
 			...this.host.baseWebviewState,
 			mode: current.mode,
@@ -727,8 +1239,11 @@ export class CommitDetailsWebviewProvider
 			includeRichContent: current.richStateLoaded,
 			autolinkedIssues: current.autolinkedIssues?.map(serializeIssueOrPullRequest),
 			pullRequest: current.pullRequest != null ? serializePullRequest(current.pullRequest) : undefined,
-			wip: serializeWipContext(current.wip),
+			wip: serializeWipContext(wip),
 			orgSettings: current.orgSettings,
+			inReview: current.inReview,
+			hasConnectedJira: current.hasConnectedJira,
+			hasAccount: current.hasAccount,
 		});
 		return state;
 	}
@@ -746,6 +1261,7 @@ export class CommitDetailsWebviewProvider
 		}
 
 		let wip: WipContext | undefined = undefined;
+		let inReview = this.inReview;
 
 		if (repository != null) {
 			if (this._wipSubscription == null) {
@@ -764,7 +1280,23 @@ export class CommitDetailsWebviewProvider
 				if (branchDetails != null) {
 					wip.branch = branchDetails.branch;
 					wip.pullRequest = branchDetails.pullRequest;
+					wip.codeSuggestions = branchDetails.codeSuggestions;
 				}
+			}
+
+			if (wip.pullRequest?.state !== 'opened') {
+				inReview = false;
+			}
+
+			// TODO: Move this into the correct place. It is being called here temporarily to guarantee it gets an up-to-date PR.
+			// Once moved, we may not need the "source" property on context anymore.
+			if (
+				this._shouldRefreshPullRequestDetails &&
+				wip.pullRequest != null &&
+				(this._context.source === 'launchpad' || this._pendingContext?.source === 'launchpad')
+			) {
+				void this.container.views.pullRequest.showPullRequest(wip.pullRequest, wip.branch ?? repository.path);
+				this._shouldRefreshPullRequestDetails = false;
 			}
 
 			if (this._pendingContext == null) {
@@ -772,30 +1304,107 @@ export class CommitDetailsWebviewProvider
 					DidChangeWipStateNotification,
 					serialize({
 						wip: serializeWipContext(wip),
+						inReview: inReview,
 					}) as DidChangeWipStateParams,
 				);
 				if (success) {
 					this._context.wip = wip;
+					this._context.inReview = inReview;
 					return;
 				}
 			}
 		}
 
-		this.updatePendingContext({ wip: wip });
+		this.updatePendingContext({ wip: wip, inReview: inReview });
 		this.updateState(true);
 	}
 
 	private async getWipBranchDetails(
 		repository: Repository,
 		branchName: string,
-	): Promise<{ branch: GitBranch; pullRequest: PullRequest | undefined } | undefined> {
-		const branch = await repository.getBranch(branchName);
+	): Promise<{ branch: GitBranch; pullRequest: PullRequest | undefined; codeSuggestions: Draft[] } | undefined> {
+		const branch = await repository.git.getBranch(branchName);
 		if (branch == null) return undefined;
+
+		if (this.mode === 'commit') {
+			return {
+				branch: branch,
+				pullRequest: undefined,
+				codeSuggestions: [],
+			};
+		}
+
+		const pullRequest = await branch.getAssociatedPullRequest({
+			expiryOverride: 1000 * 60 * 5, // 5 minutes
+		});
+
+		let codeSuggestions: Draft[] = [];
+		if (pullRequest != null) {
+			const results = await this.getCodeSuggestions(pullRequest, repository);
+			if (results.length) {
+				codeSuggestions = results;
+			}
+		}
 
 		return {
 			branch: branch,
-			pullRequest: await branch.getAssociatedPullRequest(),
+			pullRequest: pullRequest,
+			codeSuggestions: codeSuggestions,
 		};
+	}
+
+	private async canAccessDrafts(): Promise<boolean> {
+		if ((await this.getHasAccount()) === false) return false;
+
+		return getContext('gitlens:gk:organization:drafts:enabled', false);
+	}
+
+	private async getCodeSuggestions(pullRequest: PullRequest, repository: Repository): Promise<Draft[]> {
+		if (!(await this.canAccessDrafts())) return [];
+
+		const results = await this.container.drafts.getCodeSuggestions(pullRequest, repository);
+
+		for (const draft of results) {
+			if (draft.author.avatarUri != null || draft.organizationId == null) continue;
+
+			let email = draft.author.email;
+			if (email == null) {
+				const user = await this.container.organizations.getMemberById(draft.author.id, draft.organizationId);
+				email = user?.email;
+			}
+			if (email == null) continue;
+
+			draft.author.avatarUri = getAvatarUri(email);
+		}
+
+		return results;
+	}
+
+	private async updateCodeSuggestions() {
+		if (this.mode !== 'wip' || this._context.wip?.pullRequest == null) {
+			return;
+		}
+
+		const wip = this._context.wip;
+		const { pullRequest, repo } = wip;
+
+		wip.codeSuggestions = await this.getCodeSuggestions(pullRequest!, repo);
+
+		if (this._pendingContext == null) {
+			const success = await this.host.notify(
+				DidChangeWipStateNotification,
+				serialize({
+					wip: serializeWipContext(wip),
+				}) as DidChangeWipStateParams,
+			);
+			if (success) {
+				this._context.wip = wip;
+				return;
+			}
+		}
+
+		this.updatePendingContext({ wip: wip });
+		this.updateState(true);
 	}
 
 	@debug({ args: false })
@@ -863,8 +1472,8 @@ export class CommitDetailsWebviewProvider
 			commit = commitish;
 		} else if (commitish != null) {
 			if (commitish.refType === 'stash') {
-				const stash = await this.container.git.getStash(commitish.repoPath);
-				commit = stash?.commits.get(commitish.ref);
+				const gitStash = await this.container.git.getStash(commitish.repoPath);
+				commit = gitStash?.stashes.get(commitish.ref);
 			} else {
 				commit = await this.container.git.getCommit(commitish.repoPath, commitish.ref);
 			}
@@ -897,7 +1506,11 @@ export class CommitDetailsWebviewProvider
 		this.updatePendingContext(
 			{
 				commit: commit,
-				richStateLoaded: Boolean(commit?.isUncommitted) || !getContext('gitlens:hasConnectedRemotes'),
+				richStateLoaded:
+					Boolean(commit?.isUncommitted) ||
+					(commit != null
+						? !getContext('gitlens:repos:withHostingIntegrationsConnected')?.includes(commit.repoPath)
+						: !getContext('gitlens:repos:withHostingIntegrationsConnected')),
 				formattedMessage: undefined,
 				autolinkedIssues: undefined,
 				pullRequest: undefined,
@@ -942,7 +1555,7 @@ export class CommitDetailsWebviewProvider
 	}
 
 	private async getWipChange(repository: Repository): Promise<WipChange | undefined> {
-		const status = await this.container.git.getStatusForRepo(repository.path);
+		const status = await this.container.git.getStatus(repository.path);
 		if (status == null) return undefined;
 
 		const files: GitFileChangeShape[] = [];
@@ -985,6 +1598,7 @@ export class CommitDetailsWebviewProvider
 	private updatePreferences(preferences: UpdateablePreferences) {
 		if (
 			this._context.preferences?.autolinksExpanded === preferences.autolinksExpanded &&
+			this._context.preferences?.pullRequestExpanded === preferences.pullRequestExpanded &&
 			this._context.preferences?.files?.compact === preferences.files?.compact &&
 			this._context.preferences?.files?.icon === preferences.files?.icon &&
 			this._context.preferences?.files?.layout === preferences.files?.layout &&
@@ -1008,6 +1622,18 @@ export class CommitDetailsWebviewProvider
 			);
 
 			changes.autolinksExpanded = preferences.autolinksExpanded;
+		}
+
+		if (
+			preferences.pullRequestExpanded != null &&
+			this._context.preferences?.pullRequestExpanded !== preferences.pullRequestExpanded
+		) {
+			void this.container.storage.storeWorkspace(
+				'views:commitDetails:pullRequestExpanded',
+				preferences.pullRequestExpanded,
+			);
+
+			changes.pullRequestExpanded = preferences.pullRequestExpanded;
 		}
 
 		if (preferences.files != null) {
@@ -1070,6 +1696,24 @@ export class CommitDetailsWebviewProvider
 		this.updateState();
 	}
 
+	private async setInReview(inReview: boolean, source?: ShowWipArgs['source']) {
+		if (this.inReview === inReview) return;
+
+		if (this._pendingContext == null) {
+			const success = await this.host.notify(DidChangeDraftStateNotification, { inReview: inReview });
+			if (success) {
+				this._context.inReview = inReview;
+			}
+		}
+
+		this.updatePendingContext({ inReview: inReview });
+		this.updateState(true);
+
+		if (inReview) {
+			void this.trackOpenReviewMode(source);
+		}
+	}
+
 	private async notifyDidChangeState(force: boolean = false) {
 		const scope = getLogScope();
 
@@ -1091,7 +1735,7 @@ export class CommitDetailsWebviewProvider
 					state: await this.getState(context),
 				});
 			} catch (ex) {
-				Logger.error(scope, ex);
+				Logger.error(ex, scope);
 				debugger;
 			}
 		});
@@ -1190,10 +1834,6 @@ export class CommitDetailsWebviewProvider
 		return commit != null ? [commit, commit.file!] : undefined;
 	}
 
-	private showAutolinkSettings() {
-		void executeCommand(Commands.ShowSettingsPageAndJumpToAutolinks);
-	}
-
 	private showCommitPicker() {
 		void executeGitCommand({
 			command: 'log',
@@ -1226,6 +1866,10 @@ export class CommitDetailsWebviewProvider
 	}
 
 	private switchMode(params: SwitchModeParams) {
+		if (this.mode === params.mode) return;
+
+		const currentMode = this.mode;
+
 		let repo;
 		if (params.mode === 'wip') {
 			let { repoPath } = params;
@@ -1239,7 +1883,16 @@ export class CommitDetailsWebviewProvider
 			}
 		}
 
-		this.setMode(params.mode, repo);
+		void this.setMode(params.mode, repo);
+
+		this.container.telemetry.sendEvent(
+			`${this.options.attachedTo ? 'graphDetails' : 'commitDetails'}/mode/changed`,
+			{
+				...this.getTelemetryContext(),
+				'mode.old': currentMode,
+				'mode.new': params.mode,
+			},
+		);
 	}
 
 	private async openFileComparisonWithWorking(params: ExecuteFileActionParams) {
@@ -1353,10 +2006,20 @@ function serializeWipContext(wip?: WipContext): Wip | undefined {
 		repositoryCount: wip.repositoryCount,
 		branch: serializeBranch(wip.branch),
 		repo: {
+			uri: wip.repo.uri.toString(),
 			name: wip.repo.name,
 			path: wip.repo.path,
 			// type: wip.repo.provider.name,
 		},
 		pullRequest: wip.pullRequest != null ? serializePullRequest(wip.pullRequest) : undefined,
+		codeSuggestions: wip.codeSuggestions?.map(draft => serializeDraft(draft)),
 	};
+}
+
+function serializeDraft(draft: Draft): Serialized<Draft> {
+	// Inspect doesn't need changesets for the draft list
+	return serialize<Draft>({
+		...draft,
+		changesets: undefined,
+	});
 }

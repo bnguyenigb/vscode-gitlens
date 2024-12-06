@@ -1,7 +1,7 @@
 import type { RemotesConfig } from '../../config';
 import type { Container } from '../../container';
-import { configuration } from '../../system/configuration';
 import { Logger } from '../../system/logger';
+import { configuration } from '../../system/vscode/configuration';
 import { AzureDevOpsRemote } from './azure-devops';
 import { BitbucketRemote } from './bitbucket';
 import { BitbucketServerRemote } from './bitbucket-server';
@@ -28,12 +28,12 @@ const builtInProviders: RemoteProviders = [
 	{
 		custom: false,
 		matcher: 'github.com',
-		creator: (container: Container, domain: string, path: string) => new GitHubRemote(domain, path),
+		creator: (_container: Container, domain: string, path: string) => new GitHubRemote(domain, path),
 	},
 	{
 		custom: false,
 		matcher: 'gitlab.com',
-		creator: (container: Container, domain: string, path: string) => new GitLabRemote(domain, path),
+		creator: (_container: Container, domain: string, path: string) => new GitLabRemote(domain, path),
 	},
 	{
 		custom: false,
@@ -48,7 +48,7 @@ const builtInProviders: RemoteProviders = [
 	{
 		custom: false,
 		matcher: /\bgitlab\b/i,
-		creator: (container: Container, domain: string, path: string) => new GitLabRemote(domain, path),
+		creator: (_container: Container, domain: string, path: string) => new GitLabRemote(domain, path),
 	},
 	{
 		custom: false,
@@ -126,10 +126,10 @@ function getCustomProviderCreator(cfg: RemotesConfig) {
 			return (_container: Container, domain: string, path: string) =>
 				new GiteaRemote(domain, path, cfg.protocol, cfg.name, true);
 		case 'GitHub':
-			return (container: Container, domain: string, path: string) =>
+			return (_container: Container, domain: string, path: string) =>
 				new GitHubRemote(domain, path, cfg.protocol, cfg.name, true);
 		case 'GitLab':
-			return (container: Container, domain: string, path: string) =>
+			return (_container: Container, domain: string, path: string) =>
 				new GitLabRemote(domain, path, cfg.protocol, cfg.name, true);
 		default:
 			return undefined;

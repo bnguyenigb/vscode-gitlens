@@ -1,14 +1,14 @@
 import type { Command } from 'vscode';
 import { TreeItem, TreeItemCollapsibleState } from 'vscode';
 import type { DiffWithPreviousCommandArgs } from '../../commands/diffWithPrevious';
-import { Commands } from '../../constants';
+import { Commands } from '../../constants.commands';
 import { StatusFileFormatter } from '../../git/formatters/statusFormatter';
 import { GitUri } from '../../git/gitUri';
 import type { GitFile } from '../../git/models/file';
 import { getGitFileStatusIcon } from '../../git/models/file';
 import { dirname, joinPaths } from '../../system/path';
 import type { ViewsWithCommits } from '../viewBase';
-import { ViewFileNode } from './abstract/viewFileNode';
+import { getFileTooltipMarkdown, ViewFileNode } from './abstract/viewFileNode';
 import type { ViewNode } from './abstract/viewNode';
 import { ContextValues } from './abstract/viewNode';
 import type { FileNode } from './folderNode';
@@ -43,11 +43,7 @@ export class UncommittedFileNode extends ViewFileNode<'uncommitted-file', ViewsW
 			light: this.view.container.context.asAbsolutePath(joinPaths('images', 'light', icon)),
 		};
 
-		item.tooltip = StatusFileFormatter.fromTemplate(
-			`\${file}\n\${directory}/\n\n\${status}\${ (originalPath)}`,
-			this.file,
-		);
-
+		item.tooltip = getFileTooltipMarkdown(this.file);
 		item.command = this.getCommand();
 
 		// Only cache the label/description for a single refresh

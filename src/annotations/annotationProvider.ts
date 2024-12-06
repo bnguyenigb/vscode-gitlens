@@ -1,13 +1,13 @@
 import type { TextEditor, TextEditorDecorationType, TextEditorSelectionChangeEvent } from 'vscode';
 import { Disposable, window } from 'vscode';
 import type { FileAnnotationType } from '../config';
+import type { AnnotationStatus } from '../constants';
 import type { Container } from '../container';
-import { setContext } from '../system/context';
 import { Logger } from '../system/logger';
+import type { Deferred } from '../system/promise';
+import { defer } from '../system/promise';
 import type { TrackedGitDocument } from '../trackers/trackedDocument';
 import type { Decoration } from './annotations';
-
-export type AnnotationStatus = 'computing' | 'computed';
 
 export interface AnnotationContext {
 	selection?: { sha?: string; line?: never } | { sha?: never; line?: number } | false;
@@ -23,14 +23,18 @@ export function getEditorCorrelationKey(editor: TextEditor | undefined): TextEdi
 	return `${editor?.document.uri.toString()}|${editor?.viewColumn}`;
 }
 
+export type DidChangeStatusCallback = (e: { editor?: TextEditor; status?: AnnotationStatus }) => void;
+
 export abstract class AnnotationProviderBase<TContext extends AnnotationContext = AnnotationContext>
 	implements Disposable
 {
 	private decorations: Decoration[] | undefined;
 	protected disposable: Disposable;
+	private _computing: Deferred<void> | undefined;
 
 	constructor(
 		protected readonly container: Container,
+		protected readonly onDidChangeStatus: DidChangeStatusCallback,
 		public readonly annotationType: FileAnnotationType,
 		editor: TextEditor,
 		protected readonly trackedDocument: TrackedGitDocument,
@@ -43,7 +47,7 @@ export abstract class AnnotationProviderBase<TContext extends AnnotationContext 
 	}
 
 	dispose() {
-		this.clear();
+		void this.clear();
 
 		this.disposable.dispose();
 	}
@@ -75,17 +79,11 @@ export abstract class AnnotationProviderBase<TContext extends AnnotationContext 
 		return this._status;
 	}
 
-	get statusContextValue(): string | undefined {
-		return this.status != null ? `${this.status}+${this.annotationType}` : undefined;
-	}
-
-	private async setStatus(value: AnnotationStatus | undefined, editor: TextEditor | undefined): Promise<void> {
+	private setStatus(value: AnnotationStatus | undefined, editor: TextEditor | undefined): void {
 		if (this.status === value) return;
 
 		this._status = value;
-		if (editor != null && editor === window.activeTextEditor) {
-			await setContext('gitlens:annotationStatus', this.statusContextValue);
-		}
+		this.onDidChangeStatus({ editor: editor, status: value });
 	}
 
 	private onTextEditorSelectionChanged(e: TextEditorSelectionChangeEvent) {
@@ -98,11 +96,15 @@ export abstract class AnnotationProviderBase<TContext extends AnnotationContext 
 		return true;
 	}
 
-	clear() {
+	async clear() {
+		if (this._computing?.pending) {
+			await this._computing.promise;
+		}
+
 		const decorations = this.decorations;
 		this.decorations = undefined;
 		this.annotationContext = undefined;
-		void this.setStatus(undefined, this.editor);
+		this.setStatus(undefined, this.editor);
 
 		if (this.editor == null) return;
 
@@ -122,23 +124,27 @@ export abstract class AnnotationProviderBase<TContext extends AnnotationContext 
 	previousChange?(): void;
 
 	async provideAnnotation(context?: TContext, state?: AnnotationState): Promise<boolean> {
-		void this.setStatus('computing', this.editor);
+		this._computing = defer<void>();
+		this.setStatus('computing', this.editor);
 
 		try {
 			this.annotationContext = context;
 
 			if (await this.onProvideAnnotation(context, state)) {
-				void this.setStatus('computed', this.editor);
+				this.setStatus('computed', this.editor);
 				await this.selection?.(
 					state?.restoring ? { line: this.editor.selection.active.line } : context?.selection,
 				);
+
+				this._computing.fulfill();
 				return true;
 			}
 		} catch (ex) {
 			Logger.error(ex);
 		}
 
-		void this.setStatus(undefined, this.editor);
+		this.setStatus(undefined, this.editor);
+		this._computing.fulfill();
 		return false;
 	}
 
@@ -175,7 +181,7 @@ export abstract class AnnotationProviderBase<TContext extends AnnotationContext 
 			return;
 		}
 
-		void this.setStatus('computing', this.editor);
+		this.setStatus('computing', this.editor);
 
 		if (this.decorations?.length) {
 			for (const d of this.decorations) {
@@ -183,7 +189,7 @@ export abstract class AnnotationProviderBase<TContext extends AnnotationContext 
 			}
 		}
 
-		void this.setStatus('computed', this.editor);
+		this.setStatus('computed', this.editor);
 	}
 
 	selection?(selection?: TContext['selection']): Promise<void>;
@@ -193,7 +199,7 @@ export abstract class AnnotationProviderBase<TContext extends AnnotationContext 
 		if (this.decorations?.length) {
 			// If we have no new decorations, just completely clear the old ones
 			if (!decorations?.length) {
-				this.clear();
+				void this.clear();
 
 				return;
 			}

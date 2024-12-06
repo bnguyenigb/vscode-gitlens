@@ -1,8 +1,8 @@
 import type { Disposable, TreeCheckboxChangeEvent } from 'vscode';
 import { ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
 import type { ViewShowBranchComparison } from '../../config';
-import type { StoredBranchComparison, StoredBranchComparisons } from '../../constants';
 import { GlyphChars } from '../../constants';
+import type { StoredBranchComparison, StoredBranchComparisons, StoredNamedRef } from '../../constants.storage';
 import type { GitUri } from '../../git/gitUri';
 import type { GitBranch } from '../../git/models/branch';
 import { createRevisionRange, shortenRevision } from '../../git/models/reference';
@@ -39,8 +39,6 @@ export class CompareBranchNode extends SubscribeableViewNode<
 	ViewNode,
 	State
 > {
-	private _compareWith: StoredBranchComparison | undefined;
-
 	constructor(
 		uri: GitUri,
 		view: ViewsWithBranches | WorktreesView,
@@ -49,16 +47,12 @@ export class CompareBranchNode extends SubscribeableViewNode<
 		private showComparison: ViewShowBranchComparison,
 		// Specifies that the node is shown as a root
 		public readonly root: boolean = false,
-		defaultCompareWith?: StoredBranchComparison,
 	) {
 		super('compare-branch', uri, view, parent);
 
 		this.updateContext({ branch: branch, root: root, storedComparisonId: this.getStorageId() });
 		this._uniqueId = getViewNodeId(this.type, this.context);
 		this.loadCompareWith();
-		if (defaultCompareWith != null) {
-			void this.setDefaultCompareWith(defaultCompareWith);
-		}
 	}
 
 	protected override etag(): number {
@@ -77,6 +71,19 @@ export class CompareBranchNode extends SubscribeableViewNode<
 			ref1: this.branch.ref,
 			ref2: this._compareWith?.ref || 'HEAD',
 		};
+	}
+
+	get compareRef(): StoredNamedRef {
+		return { label: this.branch.name, ref: this.branch.sha! };
+	}
+
+	private _compareWith: StoredBranchComparison | undefined;
+	get compareWith(): StoredBranchComparison | undefined {
+		return this._compareWith;
+	}
+
+	get compareWithRef(): StoredNamedRef | undefined {
+		return this._compareWith != null ? { label: this._compareWith.label, ref: this._compareWith.ref } : undefined;
 	}
 
 	private _isFiltered: boolean | undefined;
@@ -114,9 +121,9 @@ export class CompareBranchNode extends SubscribeableViewNode<
 			const ahead = this.ahead;
 			const behind = this.behind;
 
-			const aheadBehindCounts = await this.view.container.git.getAheadBehindCommitCount(
+			const counts = await this.view.container.git.getLeftRightCommitCount(
 				this.branch.repoPath,
-				[createRevisionRange(behind.ref1, behind.ref2, '...')],
+				createRevisionRange(behind.ref1, behind.ref2, '...'),
 				{ authors: this.filterByAuthors },
 			);
 			const mergeBase =
@@ -141,7 +148,7 @@ export class CompareBranchNode extends SubscribeableViewNode<
 						},
 					},
 					{
-						description: pluralize('commit', aheadBehindCounts?.behind ?? 0),
+						description: pluralize('commit', counts?.right ?? 0),
 						expand: false,
 					},
 				),
@@ -163,7 +170,7 @@ export class CompareBranchNode extends SubscribeableViewNode<
 						},
 					},
 					{
-						description: pluralize('commit', aheadBehindCounts?.ahead ?? 0),
+						description: pluralize('commit', counts?.left ?? 0),
 						expand: false,
 					},
 				),
@@ -253,7 +260,26 @@ export class CompareBranchNode extends SubscribeableViewNode<
 
 	@log()
 	async edit() {
-		await this.compareWith();
+		const pick = await showReferencePicker(
+			this.branch.repoPath,
+			`Compare ${this.branch.name}${this.compareWithWorkingTree ? ' (working)' : ''} with`,
+			'Choose a reference (branch, tag, etc) to compare with',
+			{
+				allowRevisions: true,
+				picked: this.branch.ref,
+				sort: { branches: { current: true }, tags: {} },
+			},
+		);
+		if (pick == null || pick instanceof CommandQuickPickItem) return;
+
+		await this.updateCompareWith({
+			ref: pick.ref,
+			notation: undefined,
+			type: this.comparisonType,
+		});
+
+		this.children = undefined;
+		this.view.triggerNodeChange(this);
 	}
 
 	@debug()
@@ -287,29 +313,6 @@ export class CompareBranchNode extends SubscribeableViewNode<
 
 	private get compareWithWorkingTree() {
 		return this.comparisonType === 'working';
-	}
-
-	private async compareWith() {
-		const pick = await showReferencePicker(
-			this.branch.repoPath,
-			`Compare ${this.branch.name}${this.compareWithWorkingTree ? ' (working)' : ''} with`,
-			'Choose a reference (branch, tag, etc) to compare with',
-			{
-				allowRevisions: true,
-				picked: this.branch.ref,
-				sort: { branches: { current: true }, tags: {} },
-			},
-		);
-		if (pick == null || pick instanceof CommandQuickPickItem) return;
-
-		await this.updateCompareWith({
-			ref: pick.ref,
-			notation: undefined,
-			type: this.comparisonType,
-		});
-
-		this.children = undefined;
-		this.view.triggerNodeChange(this);
 	}
 
 	private async getAheadFilesQuery(): Promise<FilesQueryResults> {

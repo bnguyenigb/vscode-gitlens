@@ -5,7 +5,6 @@ import { GitUri, unknownGitUri } from '../../git/gitUri';
 import { isBranchReference, isSha } from '../../git/models/reference';
 import { showReferencePicker } from '../../quickpicks/referencePicker';
 import { UriComparer } from '../../system/comparers';
-import { setContext } from '../../system/context';
 import { gate } from '../../system/decorators/gate';
 import { debug, log } from '../../system/decorators/log';
 import { weakEvent } from '../../system/event';
@@ -13,7 +12,8 @@ import type { Deferrable } from '../../system/function';
 import { debounce } from '../../system/function';
 import { Logger } from '../../system/logger';
 import { getLogScope, setLogScopeExit } from '../../system/logger.scope';
-import { isVirtualUri } from '../../system/utils';
+import { setContext } from '../../system/vscode/context';
+import { isVirtualUri } from '../../system/vscode/utils';
 import type { FileHistoryView } from '../fileHistoryView';
 import { SubscribeableViewNode } from './abstract/subscribeableViewNode';
 import type { ViewNode } from './abstract/viewNode';
@@ -76,11 +76,7 @@ export class FileHistoryTrackerNode extends SubscribeableViewNode<'file-history-
 			if (!commitish.sha || commitish.sha === 'HEAD') {
 				branch = await this.view.container.git.getBranch(this.uri.repoPath);
 			} else if (!isSha(commitish.sha)) {
-				({
-					values: [branch],
-				} = await this.view.container.git.getBranches(this.uri.repoPath, {
-					filter: b => b.name === commitish.sha,
-				}));
+				branch = await this.view.container.git.getBranch(this.uri.repoPath, commitish.sha);
 			}
 			this.child = new FileHistoryNode(fileUri, this.view, this, folder, branch);
 		}
@@ -102,7 +98,7 @@ export class FileHistoryTrackerNode extends SubscribeableViewNode<'file-history-
 	}
 
 	get hasUri(): boolean {
-		return this._uri != unknownGitUri && this._uri.repoPath != null;
+		return this._uri !== unknownGitUri && this._uri.repoPath != null;
 	}
 
 	@gate()

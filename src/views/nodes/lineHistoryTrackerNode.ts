@@ -6,13 +6,13 @@ import { deletedOrMissing } from '../../git/models/constants';
 import { isBranchReference, isSha } from '../../git/models/reference';
 import { showReferencePicker } from '../../quickpicks/referencePicker';
 import { UriComparer } from '../../system/comparers';
-import { setContext } from '../../system/context';
 import { gate } from '../../system/decorators/gate';
 import { debug, log } from '../../system/decorators/log';
 import { weakEvent } from '../../system/event';
 import { debounce } from '../../system/function';
 import { Logger } from '../../system/logger';
 import { getLogScope, setLogScopeExit } from '../../system/logger.scope';
+import { setContext } from '../../system/vscode/context';
 import type { LinesChangeEvent } from '../../trackers/lineTracker';
 import type { FileHistoryView } from '../fileHistoryView';
 import type { LineHistoryView } from '../lineHistoryView';
@@ -59,7 +59,10 @@ export class LineHistoryTrackerNode extends SubscribeableViewNode<
 				return [];
 			}
 
-			if (this._selection == null) {
+			const selection = this._selection;
+			const editorContents = this._editorContents;
+
+			if (selection == null) {
 				this.view.description = undefined;
 
 				this.view.message = 'There was no selection provided for line history.';
@@ -84,13 +87,9 @@ export class LineHistoryTrackerNode extends SubscribeableViewNode<
 			if (!commitish.sha || commitish.sha === 'HEAD') {
 				branch = await this.view.container.git.getBranch(this.uri.repoPath);
 			} else if (!isSha(commitish.sha)) {
-				({
-					values: [branch],
-				} = await this.view.container.git.getBranches(this.uri.repoPath, {
-					filter: b => b.name === commitish.sha,
-				}));
+				branch = await this.view.container.git.getBranch(this.uri.repoPath, commitish.sha);
 			}
-			this.child = new LineHistoryNode(fileUri, this.view, this, branch, this._selection, this._editorContents);
+			this.child = new LineHistoryNode(fileUri, this.view, this, branch, selection, editorContents);
 		}
 
 		return this.child.getChildren();
@@ -112,7 +111,7 @@ export class LineHistoryTrackerNode extends SubscribeableViewNode<
 	}
 
 	get hasUri(): boolean {
-		return this._uri != unknownGitUri && this._uri.repoPath != null;
+		return this._uri !== unknownGitUri && this._uri.repoPath != null;
 	}
 
 	@gate()

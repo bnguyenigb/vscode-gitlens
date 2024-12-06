@@ -1,16 +1,16 @@
 import type { CancellationToken, ConfigurationChangeEvent, Disposable } from 'vscode';
 import { ProgressLocation, TreeItem, TreeItemCollapsibleState, window } from 'vscode';
 import type { StashesViewConfig, ViewFilesLayout } from '../config';
-import { Commands } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { GitUri } from '../git/gitUri';
 import type { GitStashReference } from '../git/models/reference';
 import { getReferenceLabel } from '../git/models/reference';
 import type { RepositoryChangeEvent } from '../git/models/repository';
 import { groupRepositories, RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
-import { executeCommand } from '../system/command';
-import { configuration } from '../system/configuration';
 import { gate } from '../system/decorators/gate';
+import { executeCommand } from '../system/vscode/command';
+import { configuration } from '../system/vscode/configuration';
 import { RepositoriesSubscribeableNode } from './nodes/abstract/repositoriesSubscribeableNode';
 import { RepositoryFolderNode } from './nodes/abstract/repositoryFolderNode';
 import type { ViewNode } from './nodes/abstract/viewNode';
@@ -34,6 +34,9 @@ export class StashesRepositoryNode extends RepositoryFolderNode<StashesView, Sta
 
 export class StashesViewNode extends RepositoriesSubscribeableNode<StashesView, StashesRepositoryNode> {
 	async getChildren(): Promise<ViewNode[]> {
+		this.view.description = this.view.getViewDescription();
+		this.view.message = undefined;
+
 		if (this.children == null) {
 			let repositories = this.view.container.git.openRepositories;
 			if (configuration.get('views.collapseWorktreesWhenPossible')) {
@@ -49,8 +52,6 @@ export class StashesViewNode extends RepositoriesSubscribeableNode<StashesView, 
 				return [];
 			}
 
-			this.view.message = undefined;
-
 			const splat = repositories.length === 1;
 			this.children = repositories.map(
 				r => new StashesRepositoryNode(GitUri.fromRepoPath(r.path), this.view, this, r, splat),
@@ -60,23 +61,18 @@ export class StashesViewNode extends RepositoriesSubscribeableNode<StashesView, 
 		if (this.children.length === 1) {
 			const [child] = this.children;
 
-			const stash = await child.repo.getStash();
-			if (stash == null || stash.commits.size === 0) {
+			const gitStash = await child.repo.git.getStash();
+			if (!gitStash?.stashes.size) {
 				this.view.message = 'No stashes could be found.';
-				this.view.title = 'Stashes';
-
 				void child.ensureSubscription();
 
 				return [];
 			}
 
-			this.view.message = undefined;
-			this.view.title = `Stashes (${stash.commits.size})`;
+			this.view.description = this.view.getViewDescription(gitStash.stashes.size);
 
 			return child.getChildren();
 		}
-
-		this.view.title = 'Stashes';
 
 		return this.children;
 	}
@@ -90,8 +86,8 @@ export class StashesViewNode extends RepositoriesSubscribeableNode<StashesView, 
 export class StashesView extends ViewBase<'stashes', StashesViewNode, StashesViewConfig> {
 	protected readonly configKey = 'stashes';
 
-	constructor(container: Container) {
-		super(container, 'stashes', 'Stashes', 'stashesView');
+	constructor(container: Container, grouped?: boolean) {
+		super(container, 'stashes', 'Stashes', 'stashesView', grouped);
 	}
 
 	override get canReveal(): boolean {
@@ -99,7 +95,7 @@ export class StashesView extends ViewBase<'stashes', StashesViewNode, StashesVie
 	}
 
 	override get canSelectMany(): boolean {
-		return true;
+		return this.container.prereleaseOrDebugging;
 	}
 
 	protected getRoot() {
@@ -107,8 +103,6 @@ export class StashesView extends ViewBase<'stashes', StashesViewNode, StashesVie
 	}
 
 	protected registerCommands(): Disposable[] {
-		void this.container.viewCommands;
-
 		return [
 			registerViewCommand(
 				this.getQualifiedCommand('copy'),
@@ -214,7 +208,7 @@ export class StashesView extends ViewBase<'stashes', StashesViewNode, StashesVie
 				})} in the side bar...`,
 				cancellable: true,
 			},
-			async (progress, token) => {
+			async (_progress, token) => {
 				const node = await this.findStash(stash, token);
 				if (node == null) return undefined;
 

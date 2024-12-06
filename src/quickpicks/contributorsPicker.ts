@@ -9,7 +9,7 @@ import type { Repository } from '../git/models/repository';
 import { debounce } from '../system/function';
 import { defer } from '../system/promise';
 import { pad, truncate } from '../system/string';
-import { getQuickPickIgnoreFocusOut } from '../system/utils';
+import { getQuickPickIgnoreFocusOut } from '../system/vscode/utils';
 
 export async function showContributorsPicker(
 	container: Container,
@@ -78,7 +78,7 @@ export async function showContributorsPicker(
 		quickpick.busy = true;
 		quickpick.show();
 
-		const contributors = await repository.getContributors();
+		const contributors = await repository.git.getContributors();
 		if (!deferred.pending) return;
 
 		const items = await Promise.all(

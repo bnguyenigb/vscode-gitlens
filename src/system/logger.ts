@@ -1,5 +1,7 @@
+import { LogInstanceNameFn } from './decorators/log';
 import type { LogLevel } from './logger.constants';
 import type { LogScope } from './logger.scope';
+import { padOrTruncateEnd } from './string';
 
 const enum OrderedLevel {
 	Off = 0,
@@ -13,6 +15,7 @@ export interface LogChannelProvider {
 	readonly name: string;
 	createChannel(name: string): LogChannel;
 	toLoggable?(o: unknown): string | undefined;
+	sanitize?: (key: string, value: any) => any;
 }
 
 export interface LogChannel {
@@ -21,6 +24,11 @@ export interface LogChannel {
 	dispose?(): void;
 	show?(preserveFocus?: boolean): void;
 }
+
+const sanitizedKeys = new Set<string>(['accessToken', 'password', 'token']);
+const defaultSanitize = function (key: string, value: any): any {
+	return sanitizedKeys.has(key) ? `<${value}>` : value;
+};
 
 export const Logger = new (class Logger {
 	private output: LogChannel | undefined;
@@ -80,7 +88,7 @@ export const Logger = new (class Logger {
 		}
 
 		if (this.isDebugging) {
-			console.log(this.timestamp, `[${this.provider!.name}]`, message ?? '', ...params);
+			console.log(`[${padOrTruncateEnd(this.provider!.name, 13)}]`, this.timestamp, message ?? '', ...params);
 		}
 
 		if (this.output == null || this.level < OrderedLevel.Debug) return;
@@ -111,15 +119,27 @@ export const Logger = new (class Logger {
 
 		if (this.isDebugging) {
 			if (ex != null) {
-				console.error(this.timestamp, `[${this.provider!.name}]`, message ?? '', ...params, ex);
+				console.error(
+					`[${padOrTruncateEnd(this.provider!.name, 13)}]`,
+					this.timestamp,
+					message ?? '',
+					...params,
+					ex,
+				);
 			} else {
-				console.error(this.timestamp, `[${this.provider!.name}]`, message ?? '', ...params);
+				console.error(
+					`[${padOrTruncateEnd(this.provider!.name, 13)}]`,
+					this.timestamp,
+					message ?? '',
+					...params,
+				);
 			}
 		}
 
 		if (this.output == null || this.level < OrderedLevel.Error) return;
 		this.output.appendLine(
 			`${this.timestamp} ${message ?? ''}${this.toLoggableParams(false, params)}${
+				// eslint-disable-next-line @typescript-eslint/no-base-to-string
 				ex != null ? `\n${String(ex)}` : ''
 			}`,
 		);
@@ -142,7 +162,7 @@ export const Logger = new (class Logger {
 		}
 
 		if (this.isDebugging) {
-			console.log(this.timestamp, `[${this.provider!.name}]`, message ?? '', ...params);
+			console.log(`[${padOrTruncateEnd(this.provider!.name, 13)}]`, this.timestamp, message ?? '', ...params);
 		}
 
 		if (this.output == null || this.level < OrderedLevel.Info) return;
@@ -180,6 +200,8 @@ export const Logger = new (class Logger {
 	toLoggable(o: any, sanitize?: ((key: string, value: any) => any) | undefined): string {
 		if (typeof o !== 'object') return String(o);
 
+		sanitize ??= this.provider!.sanitize ?? defaultSanitize;
+
 		if (Array.isArray(o)) {
 			return `[${o.map(i => this.toLoggable(i, sanitize)).join(', ')}]`;
 		}
@@ -204,6 +226,8 @@ export const Logger = new (class Logger {
 	}
 })();
 
+const maxBufferedLines = 100;
+
 export class BufferedLogChannel implements LogChannel {
 	private readonly buffer: string[] = [];
 	private bufferTimer: ReturnType<typeof setTimeout> | undefined;
@@ -217,6 +241,7 @@ export class BufferedLogChannel implements LogChannel {
 		clearInterval(this.bufferTimer);
 		this.bufferTimer = undefined;
 
+		this.flush();
 		this.channel.dispose();
 	}
 
@@ -226,7 +251,12 @@ export class BufferedLogChannel implements LogChannel {
 
 	appendLine(value: string) {
 		this.buffer.push(value);
-		this.bufferTimer ??= setInterval(() => this.flush(), this.interval);
+
+		if (this.buffer.length >= maxBufferedLines) {
+			this.flush();
+		} else {
+			this.bufferTimer ??= setInterval(() => this.flush(), this.interval);
+		}
 	}
 
 	show(preserveFocus?: boolean): void {
@@ -239,7 +269,8 @@ export class BufferedLogChannel implements LogChannel {
 		if (this.buffer.length) {
 			this._emptyCounter = 0;
 
-			const value = this.buffer.join('\n');
+			let value = this.buffer.join('\n');
+			value += '\n';
 			this.buffer.length = 0;
 
 			this.channel.append(value);
@@ -271,19 +302,28 @@ function toOrderedLevel(logLevel: LogLevel): OrderedLevel {
 	}
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
 export function getLoggableName(instance: Function | object) {
-	let name: string;
+	let ctor;
 	if (typeof instance === 'function') {
 		if (instance.prototype?.constructor == null) return instance.name;
 
-		name = instance.prototype.constructor.name ?? '';
+		ctor = instance.prototype.constructor;
 	} else {
-		name = instance.constructor?.name ?? '';
+		ctor = instance.constructor;
 	}
+
+	let name: string = ctor?.name ?? '';
 
 	// Strip webpack module name (since I never name classes with an _)
 	const index = name.indexOf('_');
-	return index === -1 ? name : name.substr(index + 1);
+	name = index === -1 ? name : name.substring(index + 1);
+
+	if (ctor?.[LogInstanceNameFn] != null) {
+		name = ctor[LogInstanceNameFn](instance, name);
+	}
+
+	return name;
 }
 
 export interface LogProvider {
@@ -296,7 +336,7 @@ export const defaultLogProvider: LogProvider = {
 	log: (logLevel: LogLevel, scope: LogScope | undefined, message: string, ...params: any[]) => {
 		switch (logLevel) {
 			case 'error':
-				Logger.error('', scope, message, ...params);
+				Logger.error(undefined, scope, message, ...params);
 				break;
 			case 'warn':
 				Logger.warn(scope, message, ...params);

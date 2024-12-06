@@ -1,3 +1,4 @@
+import { getPlatform } from '@env/platform';
 import type {
 	AuthenticationProviderAuthenticationSessionsChangeEvent,
 	AuthenticationSession,
@@ -7,7 +8,6 @@ import type {
 	StatusBarItem,
 } from 'vscode';
 import {
-	authentication,
 	CancellationTokenSource,
 	version as codeVersion,
 	Disposable,
@@ -20,48 +20,76 @@ import {
 	Uri,
 	window,
 } from 'vscode';
-import { getPlatform } from '@env/platform';
-import type { CoreColors } from '../../../constants';
-import { Commands } from '../../../constants';
+import type { OpenWalkthroughCommandArgs } from '../../../commands/walkthroughs';
+import { urls } from '../../../constants';
+import type { CoreColors } from '../../../constants.colors';
+import { Commands } from '../../../constants.commands';
+import type { StoredFeaturePreviewUsagePeriod } from '../../../constants.storage';
+import {
+	proFeaturePreviewUsageDurationInDays,
+	proFeaturePreviewUsages,
+	proPreviewLengthInDays,
+	proTrialLengthInDays,
+	SubscriptionPlanId,
+	SubscriptionState,
+} from '../../../constants.subscription';
+import type {
+	FeaturePreviewActionEventData,
+	FeaturePreviewDayEventData,
+	FeaturePreviewEventData,
+	Source,
+	SubscriptionEventData,
+	SubscriptionFeaturePreviewsEventData,
+	TrackingContext,
+} from '../../../constants.telemetry';
 import type { Container } from '../../../container';
-import { AccountValidationError } from '../../../errors';
+import { AccountValidationError, RequestsAreBlockedTemporarilyError } from '../../../errors';
+import type { FeaturePreview, FeaturePreviews } from '../../../features';
+import { featurePreviews, getFeaturePreviewLabel, getFeaturePreviewStatus } from '../../../features';
 import type { RepositoriesChangeEvent } from '../../../git/gitProviderService';
-import { pauseOnCancelOrTimeout } from '../../../system/cancellation';
-import { executeCommand, registerCommand } from '../../../system/command';
-import { configuration } from '../../../system/configuration';
-import { setContext } from '../../../system/context';
 import { createFromDateDelta, fromNow } from '../../../system/date';
 import { gate } from '../../../system/decorators/gate';
 import { debug, log } from '../../../system/decorators/log';
+import { take } from '../../../system/event';
 import type { Deferrable } from '../../../system/function';
 import { debounce, once } from '../../../system/function';
 import { Logger } from '../../../system/logger';
 import { getLogScope, setLogScopeExit } from '../../../system/logger.scope';
 import { flatten } from '../../../system/object';
+import { pauseOnCancelOrTimeout } from '../../../system/promise';
 import { pluralize } from '../../../system/string';
-import { openWalkthrough } from '../../../system/utils';
 import { satisfies } from '../../../system/version';
+import { executeCommand, registerCommand } from '../../../system/vscode/command';
+import { configuration } from '../../../system/vscode/configuration';
+import { setContext } from '../../../system/vscode/context';
+import { openUrl } from '../../../system/vscode/utils';
 import type { GKCheckInResponse } from '../checkin';
 import { getSubscriptionFromCheckIn } from '../checkin';
 import type { ServerConnection } from '../serverConnection';
 import { ensurePlusFeaturesEnabled } from '../utils';
-import { authenticationProviderId, authenticationProviderScopes } from './authenticationProvider';
+import { LoginUriPathPrefix } from './authenticationConnection';
+import { authenticationProviderScopes } from './authenticationProvider';
 import type { Organization } from './organization';
+import { getApplicablePromo } from './promos';
 import type { Subscription } from './subscription';
 import {
 	assertSubscriptionState,
 	computeSubscriptionState,
+	getCommunitySubscription,
+	getPreviewSubscription,
 	getSubscriptionPlan,
 	getSubscriptionPlanName,
+	getSubscriptionStateString,
 	getSubscriptionTimeRemaining,
 	getTimeRemaining,
 	isSubscriptionExpired,
 	isSubscriptionInProTrial,
 	isSubscriptionPaid,
 	isSubscriptionTrial,
-	SubscriptionPlanId,
-	SubscriptionState,
+	SubscriptionUpdatedUriPathPrefix,
 } from './subscription';
+
+export type FeaturePreviewChangeEvent = FeaturePreview;
 
 export interface SubscriptionChangeEvent {
 	readonly current: Subscription;
@@ -73,6 +101,11 @@ export class SubscriptionService implements Disposable {
 	private _onDidChange = new EventEmitter<SubscriptionChangeEvent>();
 	get onDidChange(): Event<SubscriptionChangeEvent> {
 		return this._onDidChange.event;
+	}
+
+	private _onDidChangeFeaturePreview = new EventEmitter<FeaturePreviewChangeEvent>();
+	get onDidChangeFeaturePreview(): Event<FeaturePreviewChangeEvent> {
+		return this._onDidChangeFeaturePreview.event;
 	}
 
 	private _onDidCheckIn = new EventEmitter<void>();
@@ -102,6 +135,8 @@ export class SubscriptionService implements Disposable {
 					this.updateContext();
 				}
 			}),
+			container.uri.onDidReceiveSubscriptionUpdatedUri(this.checkUpdatedSubscription, this),
+			container.uri.onDidReceiveLoginUri(this.onLoginUri, this),
 		);
 
 		const subscription = this.getStoredSubscription();
@@ -136,7 +171,7 @@ export class SubscriptionService implements Disposable {
 		if (session != null && e.removed?.some(s => s.id === session.id)) {
 			this._session = undefined;
 			this._sessionPromise = undefined;
-			void this.logout();
+			void this.logout(undefined);
 			return;
 		}
 
@@ -163,6 +198,138 @@ export class SubscriptionService implements Disposable {
 			...this.registerCommands(),
 		);
 		this.updateContext();
+
+		if (DEBUG) {
+			void import(/* webpackChunkName: "__debug__" */ './__debug__accountDebug').then(m => {
+				let savedSession: { session: AuthenticationSession | null | undefined } | undefined;
+
+				const setSession = (session: AuthenticationSession | null | undefined) => {
+					this._sessionPromise = undefined;
+					if (session === this._session) return;
+
+					const previous = this._session;
+					this._session = session;
+
+					// Replace the next `onAuthenticationChanged` handler to avoid our own trigger below
+					const fn = this.onAuthenticationChanged;
+					// eslint-disable-next-line @typescript-eslint/require-await
+					this.onAuthenticationChanged = async () => {
+						this.onAuthenticationChanged = fn;
+					};
+
+					// @ts-expect-error - fragile, but don't want to expose this as it is only for debugging
+					this.container.accountAuthentication._onDidChangeSessions.fire({
+						added: previous == null && session != null ? [session] : [],
+						removed: previous != null && session == null ? [previous] : [],
+						changed: previous != null && session != null ? [session] : [],
+					});
+				};
+
+				let savedFeaturePreviewOverrides:
+					| {
+							getFn: SubscriptionService['getStoredFeaturePreview'] | undefined;
+							setFn: SubscriptionService['storeFeaturePreview'] | undefined;
+					  }
+					| undefined;
+
+				m.registerAccountDebug(this.container, {
+					getSubscription: () => this._subscription,
+					overrideFeaturePreviews: ({ day, durationSeconds }) => {
+						savedFeaturePreviewOverrides ??= {
+							getFn: this.getStoredFeaturePreview,
+							setFn: this.storeFeaturePreview,
+						};
+
+						const map = new Map<FeaturePreviews, FeaturePreview>();
+
+						this.getStoredFeaturePreview = (feature: FeaturePreviews) => {
+							let featurePreview = map.get(feature);
+							if (featurePreview == null) {
+								featurePreview = {
+									feature: feature,
+									usages: [],
+								};
+								map.set(feature, featurePreview);
+
+								if (!day) return featurePreview;
+
+								const expired = new Date(0).toISOString();
+								for (let i = 1; i <= day; i++) {
+									featurePreview.usages.push({ startedOn: expired, expiresOn: expired });
+								}
+							}
+
+							return featurePreview;
+						};
+
+						this.storeFeaturePreview = (feature: FeaturePreviews) => {
+							let featurePreview = map.get(feature);
+							if (featurePreview == null) {
+								featurePreview = {
+									feature: feature,
+									usages: [],
+								};
+								map.set(feature, featurePreview);
+							}
+
+							day++;
+
+							const now = new Date();
+							const expired = new Date(0).toISOString();
+
+							for (let i = 1; i <= day; i++) {
+								if (i !== day) {
+									featurePreview.usages.push({ startedOn: expired, expiresOn: expired });
+									continue;
+								}
+
+								featurePreview.usages.push({
+									startedOn: now.toISOString(),
+									expiresOn: createFromDateDelta(now, {
+										seconds: durationSeconds,
+									}).toISOString(),
+								});
+							}
+
+							return Promise.resolve();
+						};
+
+						// Fire a change for all feature previews
+						for (const feature of featurePreviews) {
+							this._onDidChangeFeaturePreview.fire(this.getStoredFeaturePreview(feature));
+						}
+					},
+					restoreFeaturePreviews: () => {
+						if (savedFeaturePreviewOverrides) {
+							this.getStoredFeaturePreview = savedFeaturePreviewOverrides.getFn!;
+							this.storeFeaturePreview = savedFeaturePreviewOverrides.setFn!;
+							savedFeaturePreviewOverrides = undefined;
+
+							// Fire a change for all feature previews
+							for (const feature of featurePreviews) {
+								this._onDidChangeFeaturePreview.fire(this.getStoredFeaturePreview(feature));
+							}
+						}
+					},
+					overrideSession: (session: AuthenticationSession | null | undefined) => {
+						savedSession ??= { session: this._session };
+
+						setSession(session);
+					},
+					restoreSession: () => {
+						if (savedSession == null) return;
+
+						const { session } = savedSession;
+						savedSession = undefined;
+
+						setSession.call(this, session);
+					},
+					onDidCheckIn: this._onDidCheckIn,
+					changeSubscription: this.changeSubscription.bind(this),
+					getStoredSubscription: this.getStoredSubscription.bind(this),
+				});
+			});
+		}
 	}
 
 	private onRepositoriesChanged(_e: RepositoriesChangeEvent): void {
@@ -170,28 +337,27 @@ export class SubscriptionService implements Disposable {
 	}
 
 	private registerCommands(): Disposable[] {
-		void this.container.viewCommands;
-
 		return [
+			registerCommand(Commands.PlusLogin, (src?: Source) => this.loginOrSignUp(false, src)),
+			registerCommand(Commands.PlusSignUp, (src?: Source) => this.loginOrSignUp(true, src)),
+			registerCommand(Commands.PlusLogout, (src?: Source) => this.logout(src)),
 			registerCommand(Commands.GKSwitchOrganization, () => this.switchOrganization()),
-			registerCommand(Commands.PlusLogin, () => this.loginOrSignUp()),
-			registerCommand(Commands.PlusSignUp, () => this.loginOrSignUp(true)),
-			registerCommand(Commands.PlusLogout, () => this.logout()),
 
-			registerCommand(Commands.PlusStartPreviewTrial, () => this.startPreviewTrial()),
-			registerCommand(Commands.PlusReactivateProTrial, () => this.reactivateProTrial()),
-			registerCommand(Commands.PlusManage, () => this.manage()),
-			registerCommand(Commands.PlusPurchase, () => this.purchase()),
+			registerCommand(Commands.PlusManage, (src?: Source) => this.manage(src)),
+			registerCommand(Commands.PlusShowPlans, (src?: Source) => this.showPlans(src)),
+			registerCommand(Commands.PlusStartPreviewTrial, (src?: Source) => this.startPreviewTrial(src)),
+			registerCommand(Commands.PlusReactivateProTrial, (src?: Source) => this.reactivateProTrial(src)),
+			registerCommand(Commands.PlusResendVerification, (src?: Source) => this.resendVerification(src)),
+			registerCommand(Commands.PlusUpgrade, (src?: Source) => this.upgrade(src)),
 
-			registerCommand(Commands.PlusResendVerification, () => this.resendVerification()),
-			registerCommand(Commands.PlusValidate, () => this.validate({ force: true })),
+			registerCommand(Commands.PlusHide, (src?: Source) => this.setProFeaturesVisibility(false, src)),
+			registerCommand(Commands.PlusRestore, (src?: Source) => this.setProFeaturesVisibility(true, src)),
 
-			registerCommand(Commands.PlusShowPlans, () => this.showPlans()),
+			registerCommand(Commands.PlusValidate, (src?: Source) => this.validate({ force: true }, src)),
 
-			registerCommand(Commands.PlusHide, () => configuration.updateEffective('plusFeatures.enabled', false)),
-			registerCommand(Commands.PlusRestore, () => configuration.updateEffective('plusFeatures.enabled', true)),
-
-			registerCommand('gitlens.plus.reset', () => this.logout(true)),
+			registerCommand(Commands.PlusContinueFeaturePreview, ({ feature }: { feature: FeaturePreviews }) =>
+				this.continueFeaturePreview(feature),
+			),
 		];
 	}
 
@@ -207,95 +373,237 @@ export class SubscriptionService implements Disposable {
 		return this._subscription;
 	}
 
+	@gate()
+	@log()
+	async continueFeaturePreview(feature: FeaturePreviews) {
+		const preview = this.getStoredFeaturePreview(feature);
+		const status = getFeaturePreviewStatus(preview);
+
+		// If the current iteration is still active, don't do anything
+		if (status === 'active') return;
+
+		if (status === 'expired') {
+			void window.showInformationMessage(
+				`Your ${proFeaturePreviewUsages}-day preview of the ${getFeaturePreviewLabel(feature)} has expired.`,
+			);
+			return;
+		}
+
+		const now = new Date();
+		const usages = [
+			...preview.usages,
+			{
+				startedOn: now.toISOString(),
+				expiresOn: createFromDateDelta(now, {
+					days: proFeaturePreviewUsageDurationInDays,
+				}).toISOString(),
+			},
+		];
+
+		await this.storeFeaturePreview(feature, usages);
+
+		this._onDidChangeFeaturePreview.fire({ feature: feature, usages: usages });
+
+		if (this.container.telemetry.enabled) {
+			const data: FeaturePreviewActionEventData = {
+				action: `start-preview-trial:${feature}`,
+				...flattenFeaturePreview({ feature: feature, usages: usages }),
+			};
+
+			this.container.telemetry.sendEvent('subscription/action', data, { source: feature });
+		}
+	}
+
+	getFeaturePreview(feature: FeaturePreviews): FeaturePreview {
+		return this.getStoredFeaturePreview(feature);
+	}
+
+	getFeaturePreviews(): FeaturePreview[] {
+		return featurePreviews.map(f => this.getStoredFeaturePreview(f));
+	}
+
 	@debug()
-	async learnAboutPreviewOrTrial() {
+	async learnAboutPro(source: Source, originalSource: Source | undefined): Promise<void> {
+		if (originalSource != null) {
+			source.detail = {
+				...(typeof source.detail === 'string' ? { action: source.detail } : source.detail),
+				...flatten(originalSource, 'original'),
+			};
+		}
+
 		const subscription = await this.getSubscription();
-		if (subscription.state === SubscriptionState.FreeInPreviewTrial) {
-			void openWalkthrough(
-				this.container.context.extension.id,
-				'gitlens.welcome',
-				'gitlens.welcome.preview',
-				false,
+		switch (subscription.state) {
+			case SubscriptionState.VerificationRequired:
+			case SubscriptionState.Community:
+				void executeCommand<OpenWalkthroughCommandArgs>(Commands.OpenWalkthrough, {
+					...source,
+					step: 'get-started-community',
+				});
+				break;
+			case SubscriptionState.ProTrial:
+			case SubscriptionState.ProPreview:
+				void executeCommand<OpenWalkthroughCommandArgs>(Commands.OpenWalkthrough, {
+					...source,
+					step: 'welcome-in-trial',
+				});
+				break;
+			case SubscriptionState.ProTrialReactivationEligible:
+			case SubscriptionState.ProTrialExpired:
+			case SubscriptionState.ProPreviewExpired:
+				void executeCommand<OpenWalkthroughCommandArgs>(Commands.OpenWalkthrough, {
+					...source,
+					step: 'welcome-in-trial-expired',
+				});
+				break;
+			case SubscriptionState.Paid:
+				void executeCommand<OpenWalkthroughCommandArgs>(Commands.OpenWalkthrough, {
+					...source,
+					step: 'welcome-paid',
+				});
+				break;
+		}
+	}
+
+	private async showPlanMessage(source: Source | undefined) {
+		if (!(await this.ensureSession(false))) return;
+		const {
+			account,
+			plan: { actual, effective },
+		} = this._subscription;
+
+		if (account?.verified === false) {
+			const verify: MessageItem = { title: 'Resend Email' };
+			const confirm: MessageItem = { title: 'Continue', isCloseAffordance: true };
+
+			const result = await window.showInformationMessage(
+				'Welcome to GitLens',
+				{ modal: true, detail: 'Verify the email we just sent you to start your Pro trial.' },
+				verify,
+				confirm,
 			);
-		} else if (subscription.state === SubscriptionState.FreePlusInTrial) {
-			void openWalkthrough(
-				this.container.context.extension.id,
-				'gitlens.welcome',
-				'gitlens.welcome.trial',
-				false,
+
+			if (result === verify) {
+				void this.resendVerification(source);
+			}
+		} else if (isSubscriptionPaid(this._subscription)) {
+			const learn: MessageItem = { title: 'Learn More' };
+			const confirm: MessageItem = { title: 'Continue', isCloseAffordance: true };
+			const result = await window.showInformationMessage(
+				`You are now on ${actual.name} and have full access to all GitLens Pro features.`,
+				{ modal: true },
+				confirm,
+				learn,
 			);
+
+			if (result === learn) {
+				void this.learnAboutPro({ source: 'prompt', detail: { action: 'upgraded' } }, source);
+			}
+		} else if (isSubscriptionTrial(this._subscription)) {
+			const days = getSubscriptionTimeRemaining(this._subscription, 'days') ?? 0;
+
+			const learn: MessageItem = { title: 'Learn More' };
+			const confirm: MessageItem = { title: 'Continue', isCloseAffordance: true };
+			const result = await window.showInformationMessage(
+				`Welcome to your ${effective.name} Trial.\n\nYou now have full access to all GitLens Pro features for ${
+					days < 1 ? '<1 more day' : pluralize('day', days, { infix: ' more ' })
+				}.`,
+				{
+					modal: true,
+					detail: 'Your trial also includes access to the GitKraken DevEx platform, unleashing powerful Git visualization & productivity capabilities everywhere you work: IDE, desktop, browser, and terminal.',
+				},
+				confirm,
+				learn,
+			);
+
+			if (result === learn) {
+				void this.learnAboutPro({ source: 'prompt', detail: { action: 'trial-started' } }, source);
+			}
+		} else {
+			const upgrade: MessageItem = { title: 'Upgrade to Pro' };
+			const learn: MessageItem = { title: 'Community vs. Pro' };
+			const confirm: MessageItem = { title: 'Continue', isCloseAffordance: true };
+			const result = await window.showInformationMessage(
+				`You are now on ${actual.name}.`,
+				{
+					modal: true,
+					detail: 'You only have access to Pro features on publicly-hosted repos. For full access to all Pro features, please upgrade to GitLens Pro.',
+				},
+				upgrade,
+				learn,
+				confirm,
+			);
+
+			if (result === upgrade) {
+				void this.upgrade(source);
+			} else if (result === learn) {
+				void this.learnAboutPro({ source: 'prompt', detail: { action: 'trial-ended' } }, source);
+			}
 		}
 	}
 
 	@log()
-	async loginOrSignUp(signUp: boolean = false): Promise<boolean> {
+	async loginOrSignUp(signUp: boolean, source: Source | undefined): Promise<boolean> {
 		if (!(await ensurePlusFeaturesEnabled())) return false;
 
+		if (this.container.telemetry.enabled) {
+			this.container.telemetry.sendEvent(
+				'subscription/action',
+				{ action: signUp ? 'sign-up' : 'sign-in' },
+				source,
+			);
+		}
+
+		const context = getTrackingContextFromSource(source);
+		return this.loginCore({ signUp: signUp, source: source, context: context });
+	}
+
+	async loginWithCode(authentication: { code: string; state?: string }, source?: Source): Promise<boolean> {
+		if (!(await ensurePlusFeaturesEnabled())) return false;
+		if (this.container.telemetry.enabled) {
+			this.container.telemetry.sendEvent('subscription/action', { action: 'sign-in' }, source);
+		}
+
+		const session = await this.ensureSession(false);
+		if (session != null) {
+			await this.logout(source);
+		}
+
+		return this.loginCore({ signIn: authentication, source: source });
+	}
+
+	private async loginCore(options?: {
+		signUp?: boolean;
+		source?: Source;
+		signIn?: { code: string; state?: string };
+		context?: TrackingContext;
+	}): Promise<boolean> {
 		// Abort any waiting authentication to ensure we can start a new flow
 		await this.container.accountAuthentication.abort();
 		void this.showAccountView();
 
-		const session = await this.ensureSession(true, { signUp: signUp });
+		const session = await this.ensureSession(true, {
+			signIn: options?.signIn,
+			signUp: options?.signUp,
+			context: options?.context,
+		});
 		const loggedIn = Boolean(session);
 		if (loggedIn) {
-			const {
-				account,
-				plan: { actual, effective },
-			} = this._subscription;
-
-			if (account?.verified === false) {
-				const confirm: MessageItem = { title: 'Resend Verification', isCloseAffordance: true };
-				const cancel: MessageItem = { title: 'Cancel' };
-				const result = await window.showInformationMessage(
-					`You must verify your email before you can access ${effective.name}.`,
-					confirm,
-					cancel,
-				);
-
-				if (result === confirm) {
-					void this.resendVerification();
-				}
-			} else if (isSubscriptionTrial(this._subscription)) {
-				const remaining = getSubscriptionTimeRemaining(this._subscription, 'days');
-
-				const confirm: MessageItem = { title: 'OK', isCloseAffordance: true };
-				const learn: MessageItem = { title: 'Learn More' };
-				const result = await window.showInformationMessage(
-					`Welcome to ${
-						effective.name
-					} (Trial). You can now try Pro features on privately hosted repos for ${pluralize(
-						'more day',
-						remaining ?? 0,
-					)}.`,
-					{ modal: true },
-					confirm,
-					learn,
-				);
-
-				if (result === learn) {
-					void this.learnAboutPreviewOrTrial();
-				}
-			} else if (isSubscriptionPaid(this._subscription)) {
-				void window.showInformationMessage(
-					`Welcome to ${actual.name}. You can now use Pro features on privately hosted repos.`,
-					'OK',
-				);
-			} else {
-				void window.showInformationMessage(
-					`Welcome to ${actual.name}. You can use Pro features on local & publicly hosted repos.`,
-					'OK',
-				);
-			}
+			void this.showPlanMessage(options?.source);
 		}
 		return loggedIn;
 	}
 
 	@log()
-	async logout(reset: boolean = false): Promise<void> {
-		return this.logoutCore(reset);
+	async logout(source: Source | undefined): Promise<void> {
+		if (this.container.telemetry.enabled) {
+			this.container.telemetry.sendEvent('subscription/action', { action: 'sign-out' }, source);
+		}
+
+		return this.logoutCore();
 	}
 
-	private async logoutCore(reset: boolean = false): Promise<void> {
+	private async logoutCore(): Promise<void> {
+		this.connection.resetRequestExceptionCount();
 		this._lastValidatedDate = undefined;
 		if (this._validationTimer != null) {
 			clearInterval(this._validationTimer);
@@ -313,63 +621,114 @@ export class SubscriptionService implements Disposable {
 			void this.container.accountAuthentication.removeSessionsByScopes(authenticationProviderScopes);
 		}
 
-		if (reset && this.container.debugging) {
-			this.changeSubscription(undefined);
+		this.changeSubscription(getCommunitySubscription(this._subscription));
+	}
 
+	@log()
+	async manage(source: Source | undefined): Promise<void> {
+		const scope = getLogScope();
+		if (this.container.telemetry.enabled) {
+			this.container.telemetry.sendEvent('subscription/action', { action: 'manage' }, source);
+		}
+
+		try {
+			const exchangeToken = await this.container.accountAuthentication.getExchangeToken();
+			await openUrl(this.container.getGkDevUri('account', `token=${exchangeToken}`).toString(true));
+		} catch (ex) {
+			Logger.error(ex, scope);
+			await openUrl(this.container.getGkDevUri('account').toString(true));
+		}
+	}
+
+	@gate(() => '')
+	@log()
+	async reactivateProTrial(source: Source | undefined): Promise<void> {
+		if (!(await ensurePlusFeaturesEnabled())) return;
+		const scope = getLogScope();
+
+		if (this.container.telemetry.enabled) {
+			this.container.telemetry.sendEvent('subscription/action', { action: 'reactivate' }, source);
+		}
+
+		const session = await this.ensureSession(false);
+		if (session == null) return;
+
+		try {
+			const rsp = await this.connection.fetchApi('user/reactivate-trial', {
+				method: 'POST',
+				body: JSON.stringify({ client: 'gitlens' }),
+			});
+
+			if (!rsp.ok) {
+				if (rsp.status === 409) {
+					void window.showErrorMessage(
+						'You are not eligible to reactivate your Pro trial. If you feel that is an error, please contact support.',
+						'OK',
+					);
+					return;
+				}
+
+				void window.showErrorMessage(
+					`Unable to reactivate trial: (${rsp.status}) ${rsp.statusText}. Please try again. If this issue persists, please contact support.`,
+					'OK',
+				);
+				return;
+			}
+		} catch (ex) {
+			if (ex instanceof RequestsAreBlockedTemporarilyError) {
+				void window.showErrorMessage(
+					'Unable to reactivate trial: Too many failed requests. Please reload the window and try again.',
+					'OK',
+				);
+				return;
+			}
+
+			void window.showErrorMessage(
+				`Unable to reactivate trial. Please try again. If this issue persists, please contact support.`,
+				'OK',
+			);
+			Logger.error(ex, scope);
 			return;
 		}
 
-		this.changeSubscription({
-			...this._subscription,
-			plan: {
-				actual: getSubscriptionPlan(
-					SubscriptionPlanId.Free,
-					false,
-					0,
-					undefined,
-					this._subscription.plan?.actual?.startedOn != null
-						? new Date(this._subscription.plan.actual.startedOn)
-						: undefined,
-				),
-				effective: getSubscriptionPlan(
-					SubscriptionPlanId.Free,
-					false,
-					0,
-					undefined,
-					this._subscription.plan?.effective?.startedOn != null
-						? new Date(this._subscription.plan.actual.startedOn)
-						: undefined,
-				),
-			},
-			account: undefined,
-			activeOrganization: undefined,
-		});
-	}
+		// Trial was reactivated. Do a check-in to update, and show a message if successful.
+		try {
+			await this.checkInAndValidate(session, { force: true });
+			if (isSubscriptionTrial(this._subscription)) {
+				const remaining = getSubscriptionTimeRemaining(this._subscription, 'days');
 
-	@log()
-	manage(): void {
-		void env.openExternal(this.connection.getAccountsUri());
-	}
+				const confirm: MessageItem = { title: 'OK', isCloseAffordance: true };
+				const learn: MessageItem = { title: "See What's New" };
+				const result = await window.showInformationMessage(
+					`Your GitLens Pro trial has been reactivated! Experience all the new Pro features for another ${pluralize(
+						'day',
+						remaining ?? 0,
+					)}.`,
+					{ modal: true },
+					confirm,
+					learn,
+				);
 
-	@log()
-	async purchase(): Promise<void> {
-		if (!(await ensurePlusFeaturesEnabled())) return;
-
-		if (this._subscription.account == null) {
-			this.showPlans();
-		} else {
-			void env.openExternal(this.connection.getAccountsUri('subscription', 'product=gitlens&license=PRO'));
+				if (result === learn) {
+					void openUrl(urls.releaseNotes);
+				}
+			}
+		} catch (ex) {
+			Logger.error(ex, scope);
+			debugger;
 		}
-		await this.showAccountView();
 	}
 
-	@gate()
+	@gate(() => '')
 	@log()
-	async resendVerification(): Promise<boolean> {
+	async resendVerification(source: Source | undefined): Promise<boolean> {
 		if (this._subscription.account?.verified) return true;
 
 		const scope = getLogScope();
 
+		if (this.container.telemetry.enabled) {
+			this.container.telemetry.sendEvent('subscription/action', { action: 'resend-verification' }, source);
+		}
 		void this.showAccountView(true);
 
 		const session = await this.ensureSession(false);
@@ -407,7 +766,7 @@ export class SubscriptionService implements Disposable {
 			);
 
 			if (result === confirm) {
-				await this.validate({ force: true });
+				await this.validate({ force: true }, source);
 				return true;
 			}
 		} catch (ex) {
@@ -420,40 +779,62 @@ export class SubscriptionService implements Disposable {
 		return false;
 	}
 
+	private setProFeaturesVisibility(visible: boolean, source: Source | undefined) {
+		if (this.container.telemetry.enabled) {
+			this.container.telemetry.sendEvent(
+				'subscription/action',
+				{ action: 'visibility', visible: visible },
+				source,
+			);
+		}
+
+		void configuration.updateEffective('plusFeatures.enabled', visible);
+	}
+
 	@log()
 	async showAccountView(silent: boolean = false): Promise<void> {
 		if (silent && !configuration.get('plusFeatures.enabled', undefined, true)) return;
 
-		if (!this.container.accountView.visible) {
+		if (!this.container.views.home.visible) {
 			await executeCommand(Commands.ShowAccountView);
 		}
 	}
 
-	private showPlans(): void {
-		void env.openExternal(this.connection.getSiteUri('gitlens/pricing'));
+	private showPlans(source: Source | undefined): void {
+		if (this.container.telemetry.enabled) {
+			this.container.telemetry.sendEvent('subscription/action', { action: 'pricing' }, source);
+		}
+
+		void openUrl(urls.pricing);
 	}
 
-	@gate()
+	@gate(() => '')
 	@log()
-	async startPreviewTrial(silent?: boolean): Promise<void> {
+	async startPreviewTrial(source: Source | undefined): Promise<void> {
 		if (!(await ensurePlusFeaturesEnabled())) return;
 
-		let { plan, previewTrial } = this._subscription;
+		if (this.container.telemetry.enabled) {
+			this.container.telemetry.sendEvent('subscription/action', { action: 'start-preview-trial' }, source);
+		}
+
+		const { plan, previewTrial } = this._subscription;
 		if (previewTrial != null) {
 			void this.showAccountView();
 
-			if (!silent && plan.effective.id === SubscriptionPlanId.Free) {
-				const confirm: MessageItem = { title: 'Start Pro Trial', isCloseAffordance: true };
-				const cancel: MessageItem = { title: 'Cancel' };
+			if (plan.effective.id === SubscriptionPlanId.Community) {
+				const signUp: MessageItem = { title: 'Try GitLens Pro' };
+				const signIn: MessageItem = { title: 'Sign In' };
+				const cancel: MessageItem = { title: 'Cancel', isCloseAffordance: true };
 				const result = await window.showInformationMessage(
-					'Your 3-day preview has ended. Start a free GitLens Pro trial to get an additional 7 days.\n\n✨ A trial or paid plan is required to use Pro features on privately hosted repos.',
+					`Do you want to start your free ${proTrialLengthInDays}-day Pro trial for full access to all GitLens Pro features?`,
 					{ modal: true },
-					confirm,
+					signUp,
+					signIn,
 					cancel,
 				);
 
-				if (result === confirm) {
-					void this.loginOrSignUp();
+				if (result === signUp || result === signIn) {
+					void this.loginOrSignUp(result === signUp, source);
 				}
 			}
 
@@ -463,117 +844,127 @@ export class SubscriptionService implements Disposable {
 		// Don't overwrite a trial that is already in progress
 		if (isSubscriptionInProTrial(this._subscription)) return;
 
-		const startedOn = new Date();
+		const days = proPreviewLengthInDays;
+		const subscription = getPreviewSubscription(days, this._subscription);
+		this.changeSubscription(subscription);
 
-		let days: number;
-		let expiresOn = new Date(startedOn);
-		if (!this.container.debugging) {
-			// Normalize the date to just before midnight on the same day
-			expiresOn.setHours(23, 59, 59, 999);
-			expiresOn = createFromDateDelta(expiresOn, { days: 3 });
-			days = 3;
-		} else {
-			expiresOn = createFromDateDelta(expiresOn, { minutes: 1 });
-			days = 0;
-		}
+		setTimeout(async () => {
+			const confirm: MessageItem = { title: 'Continue' };
+			const learn: MessageItem = { title: 'Learn More' };
+			const result = await window.showInformationMessage(
+				`You can now preview local Pro features for ${
+					days < 1 ? '1 day' : pluralize('day', days)
+				}, or for full access to all GitLens Pro features, [start your free ${proTrialLengthInDays}-day Pro trial](command:gitlens.plus.signUp "Try GitLens Pro") — no credit card required.`,
+				confirm,
+				learn,
+			);
 
-		previewTrial = {
-			startedOn: startedOn.toISOString(),
-			expiresOn: expiresOn.toISOString(),
-		};
-
-		this.changeSubscription({
-			...this._subscription,
-			plan: {
-				...this._subscription.plan,
-				effective: getSubscriptionPlan(SubscriptionPlanId.Pro, false, 0, undefined, startedOn, expiresOn),
-			},
-			previewTrial: previewTrial,
-		});
-
-		if (!silent) {
-			setTimeout(async () => {
-				const confirm: MessageItem = { title: 'OK', isCloseAffordance: true };
-				const learn: MessageItem = { title: 'Learn More' };
-				const result = await window.showInformationMessage(
-					`You can now preview Pro features for ${pluralize(
-						'day',
-						days,
-					)}. After which, you can start a free GitLens Pro trial for an additional 7 days.`,
-					confirm,
-					learn,
-				);
-
-				if (result === learn) {
-					void this.learnAboutPreviewOrTrial();
-				}
-			}, 1);
-		}
+			if (result === learn) {
+				void this.learnAboutPro({ source: 'notification', detail: { action: 'preview-started' } }, source);
+			}
+		}, 1);
 	}
 
-	@gate()
 	@log()
-	async reactivateProTrial(): Promise<void> {
-		if (!(await ensurePlusFeaturesEnabled())) return;
+	async upgrade(source: Source | undefined): Promise<void> {
 		const scope = getLogScope();
 
-		const session = await this.ensureSession(false);
-		if (session == null) return;
+		if (!(await ensurePlusFeaturesEnabled())) return;
 
-		const rsp = await this.connection.fetchApi('user/reactivate-trial', {
-			method: 'POST',
-			body: JSON.stringify({ client: 'gitlens' }),
-		});
-
-		if (!rsp.ok) {
-			if (rsp.status === 409) {
-				void window.showErrorMessage(
-					'Unable to reactivate trial: User not eligible. Please try again. If this issue persists, please contact support.',
-					'OK',
-				);
-				return;
-			}
-
-			void window.showErrorMessage(
-				`Unable to reactivate trial: (${rsp.status}) ${rsp.statusText}. Please try again. If this issue persists, please contact support.`,
-				'OK',
-			);
-			return;
+		if (this.container.telemetry.enabled) {
+			this.container.telemetry.sendEvent('subscription/action', { action: 'upgrade' }, source);
 		}
 
-		// Trial was reactivated. Do a check-in to update, and show a message if successful.
-		try {
-			await this.checkInAndValidate(session, { force: true });
-			if (isSubscriptionTrial(this._subscription)) {
-				const remaining = getSubscriptionTimeRemaining(this._subscription, 'days');
-
-				const confirm: MessageItem = { title: 'OK', isCloseAffordance: true };
-				const learn: MessageItem = { title: "See What's New" };
-				const result = await window.showInformationMessage(
-					`Your new trial has been activated! Enjoy access to Pro features on privately hosted repos for another ${pluralize(
-						'day',
-						remaining ?? 0,
-					)}.`,
-					{ modal: true },
-					confirm,
-					learn,
-				);
-
-				if (result === learn) {
-					void env.openExternal(
-						Uri.parse('https://help.gitkraken.com/gitlens/gitlens-release-notes-current/'),
-					);
+		if (this._subscription.account != null) {
+			// Do a pre-check-in to see if we've already upgraded to a paid plan.
+			try {
+				const session = await this.ensureSession(false);
+				if (session != null) {
+					if ((await this.checkUpdatedSubscription()) === SubscriptionState.Paid) {
+						return;
+					}
 				}
+			} catch {}
+		}
+
+		const query = new URLSearchParams();
+		query.set('source', 'gitlens');
+		query.set('product', 'gitlens');
+
+		const hasAccount = this._subscription.account != null;
+
+		const promoCode = getApplicablePromo(this._subscription.state)?.code;
+		if (promoCode != null) {
+			query.set('promoCode', promoCode);
+		}
+
+		const activeOrgId = this._subscription.activeOrganization?.id;
+		if (activeOrgId != null) {
+			query.set('org', activeOrgId);
+		}
+
+		const context = getTrackingContextFromSource(source);
+		if (context != null) {
+			query.set('context', context);
+		}
+
+		try {
+			if (hasAccount) {
+				const token = await this.container.accountAuthentication.getExchangeToken(
+					SubscriptionUpdatedUriPathPrefix,
+				);
+				query.set('token', token);
+			} else {
+				const successUri = await env.asExternalUri(
+					Uri.parse(`${env.uriScheme}://${this.container.context.extension.id}/${LoginUriPathPrefix}`),
+				);
+				query.set('success_uri', successUri.toString(true));
+			}
+
+			if (!(await openUrl(this.container.getGkDevUri('purchase/checkout', query.toString()).toString(true)))) {
+				return;
 			}
 		} catch (ex) {
 			Logger.error(ex, scope);
-			debugger;
+			if (!(await openUrl(this.container.getGkDevUri('purchase/checkout', query.toString()).toString(true)))) {
+				return;
+			}
+		}
+
+		const completionPromises = [new Promise<boolean>(resolve => setTimeout(() => resolve(false), 5 * 60 * 1000))];
+
+		if (hasAccount) {
+			completionPromises.push(
+				new Promise<boolean>(resolve =>
+					take(
+						window.onDidChangeWindowState,
+						2,
+					)(e => {
+						if (e.focused) {
+							resolve(true);
+						}
+					}),
+				),
+				new Promise<boolean>(resolve =>
+					once(this.container.uri.onDidReceiveSubscriptionUpdatedUri)(() => resolve(false)),
+				),
+			);
+		} else {
+			completionPromises.push(
+				new Promise<boolean>(resolve => once(this.container.uri.onDidReceiveLoginUri)(() => resolve(false))),
+			);
+		}
+
+		const refresh = await Promise.race(completionPromises);
+
+		if (refresh) {
+			void this.checkUpdatedSubscription();
 		}
 	}
 
 	@gate<SubscriptionService['validate']>(o => `${o?.force ?? false}`)
 	@log()
-	async validate(options?: { force?: boolean }): Promise<void> {
+	async validate(options?: { force?: boolean }, _source?: Source | undefined): Promise<void> {
 		const scope = getLogScope();
 
 		const session = await this.ensureSession(false);
@@ -595,7 +986,7 @@ export class SubscriptionService implements Disposable {
 	@debug<SubscriptionService['checkInAndValidate']>({ args: { 0: s => s?.account?.label } })
 	private async checkInAndValidate(
 		session: AuthenticationSession,
-		options?: { force?: boolean; showSlowProgress?: boolean },
+		options?: { force?: boolean; showSlowProgress?: boolean; organizationId?: string },
 	): Promise<GKCheckInResponse | undefined> {
 		const scope = getLogScope();
 
@@ -610,14 +1001,14 @@ export class SubscriptionService implements Disposable {
 			return;
 		}
 
-		const validating = this.checkInAndValidateCore(session);
+		const validating = this.checkInAndValidateCore(session, options?.organizationId);
 		if (!options?.showSlowProgress) return validating;
 
 		// Show progress if we are waiting too long
 		const result = await pauseOnCancelOrTimeout(validating, undefined, 3000);
 		if (result.paused) {
 			return window.withProgress(
-				{ location: ProgressLocation.Notification, title: 'Validating your GitKraken account...' },
+				{ location: ProgressLocation.Notification, title: 'Validating your account...' },
 				() => result.value,
 			);
 		}
@@ -627,7 +1018,10 @@ export class SubscriptionService implements Disposable {
 
 	@gate<SubscriptionService['checkInAndValidateCore']>(s => s.account.id)
 	@debug<SubscriptionService['checkInAndValidateCore']>({ args: { 0: s => s?.account?.label } })
-	private async checkInAndValidateCore(session: AuthenticationSession): Promise<GKCheckInResponse | undefined> {
+	private async checkInAndValidateCore(
+		session: AuthenticationSession,
+		organizationId?: string,
+	): Promise<GKCheckInResponse | undefined> {
 		const scope = getLogScope();
 		this._lastValidatedDate = undefined;
 
@@ -651,7 +1045,7 @@ export class SubscriptionService implements Disposable {
 					method: 'POST',
 					body: JSON.stringify(checkInData),
 				},
-				{ token: session.accessToken },
+				{ token: session.accessToken, organizationId: organizationId },
 			);
 
 			if (!rsp.ok) {
@@ -672,6 +1066,9 @@ export class SubscriptionService implements Disposable {
 
 			Logger.error(ex, scope);
 			debugger;
+
+			// If we cannot check in, validate stored subscription
+			this.changeSubscription(this._subscription);
 			if (ex instanceof AccountValidationError) throw ex;
 
 			throw new AccountValidationError('Unable to validate account', ex);
@@ -766,7 +1163,12 @@ export class SubscriptionService implements Disposable {
 	@debug()
 	private async ensureSession(
 		createIfNeeded: boolean,
-		options?: { force?: boolean; signUp?: boolean },
+		options?: {
+			force?: boolean;
+			signUp?: boolean;
+			signIn?: { code: string; state?: string };
+			context?: TrackingContext;
+		},
 	): Promise<AuthenticationSession | undefined> {
 		if (this._sessionPromise != null) {
 			void (await this._sessionPromise);
@@ -776,7 +1178,11 @@ export class SubscriptionService implements Disposable {
 		if (this._session === null && !createIfNeeded) return undefined;
 
 		if (this._sessionPromise === undefined) {
-			this._sessionPromise = this.getOrCreateSession(createIfNeeded, options?.signUp).then(
+			this._sessionPromise = this.getOrCreateSession(createIfNeeded, {
+				signUp: options?.signUp,
+				signIn: options?.signIn,
+				context: options?.context,
+			}).then(
 				s => {
 					this._session = s;
 					this._sessionPromise = undefined;
@@ -797,23 +1203,24 @@ export class SubscriptionService implements Disposable {
 	@debug()
 	private async getOrCreateSession(
 		createIfNeeded: boolean,
-		signUp: boolean = false,
+		options?: { signUp?: boolean; signIn?: { code: string; state?: string }; context?: TrackingContext },
 	): Promise<AuthenticationSession | null> {
 		const scope = getLogScope();
 
 		let session: AuthenticationSession | null | undefined;
-
 		try {
-			session = await authentication.getSession(
-				authenticationProviderId,
-				signUp ? [...authenticationProviderScopes, 'signUp'] : authenticationProviderScopes,
-				{
-					createIfNone: createIfNeeded,
-					silent: !createIfNeeded,
-				},
+			if (options != null && createIfNeeded) {
+				this.container.accountAuthentication.setOptionsForScopes(authenticationProviderScopes, options);
+			}
+			session = await this.container.accountAuthentication.getOrCreateSession(
+				authenticationProviderScopes,
+				createIfNeeded,
 			);
 		} catch (ex) {
 			session = null;
+			if (options != null && createIfNeeded) {
+				this.container.accountAuthentication.clearOptionsForScopes(authenticationProviderScopes);
+			}
 
 			if (ex instanceof Error && ex.message.includes('User did not consent')) {
 				setLogScopeExit(scope, ' \u2022 User declined authentication');
@@ -870,14 +1277,20 @@ export class SubscriptionService implements Disposable {
 						queueMicrotask(async () => {
 							const confirm: MessageItem = { title: 'Retry Sign In' };
 							const result = await window.showErrorMessage(
-								`Unable to sign in to your (${name}) GitKraken account. Please try again. If this issue persists, please contact support.${
+								`Unable to sign in to your (${name}) account. Please try again. If this issue persists, please contact support.${
 									unauthorized ? '' : ` Error=${ex.message}`
 								}`,
 								confirm,
 							);
 
 							if (result === confirm) {
-								void this.loginOrSignUp();
+								void this.loginOrSignUp(false, {
+									source: 'subscription',
+									detail: {
+										error: 'validation-failed',
+										'error.message': ex.message,
+									},
+								});
 							}
 						});
 					}
@@ -886,7 +1299,7 @@ export class SubscriptionService implements Disposable {
 
 					// if ((ex.original as any)?.code !== 'ENOTFOUND') {
 					// 	void window.showErrorMessage(
-					// 		`Unable to sign in to your (${name}) GitKraken account right now. Please try again in a few minutes. If this issue persists, please contact support. Error=${ex.message}`,
+					// 		`Unable to sign in to your (${name}) account right now. Please try again in a few minutes. If this issue persists, please contact support. Error=${ex.message}`,
 					// 		'OK',
 					// 	);
 					// }
@@ -894,6 +1307,7 @@ export class SubscriptionService implements Disposable {
 			}
 		}
 
+		this.connection.resetRequestExceptionCount();
 		return session;
 	}
 
@@ -905,11 +1319,11 @@ export class SubscriptionService implements Disposable {
 		if (subscription == null) {
 			subscription = {
 				plan: {
-					actual: getSubscriptionPlan(SubscriptionPlanId.Free, false, 0, undefined),
-					effective: getSubscriptionPlan(SubscriptionPlanId.Free, false, 0, undefined),
+					actual: getSubscriptionPlan(SubscriptionPlanId.Community, false, 0, undefined),
+					effective: getSubscriptionPlan(SubscriptionPlanId.Community, false, 0, undefined),
 				},
 				account: undefined,
-				state: SubscriptionState.Free,
+				state: SubscriptionState.Community,
 			};
 		}
 
@@ -942,6 +1356,9 @@ export class SubscriptionService implements Disposable {
 		subscription.state = computeSubscriptionState(subscription);
 		assertSubscriptionState(subscription);
 
+		const promo = getApplicablePromo(subscription.state);
+		void setContext('gitlens:promo', promo?.key);
+
 		const previous = this._subscription as typeof this._subscription | undefined; // Can be undefined here, since we call this in the constructor
 		// Check the previous and new subscriptions are exactly the same
 		const matches = previous != null && JSON.stringify(previous) === JSON.stringify(subscription);
@@ -955,7 +1372,7 @@ export class SubscriptionService implements Disposable {
 		}
 
 		queueMicrotask(() => {
-			let data = flattenSubscription(subscription);
+			let data = flattenSubscription(subscription, undefined, this.getFeaturePreviews());
 			this.container.telemetry.setGlobalAttributes(data);
 
 			data = {
@@ -966,7 +1383,9 @@ export class SubscriptionService implements Disposable {
 			this.container.telemetry.sendEvent(previous == null ? 'subscription' : 'subscription/changed', data);
 		});
 
-		void this.storeSubscription(subscription);
+		if (options?.store !== false) {
+			void this.storeSubscription(subscription);
+		}
 
 		this._subscription = subscription;
 		this._etag = Date.now();
@@ -1000,6 +1419,17 @@ export class SubscriptionService implements Disposable {
 			(subscription.plan.effective as Mutable<Subscription['plan']['effective']>).name = getSubscriptionPlanName(
 				subscription.plan.effective.id,
 			);
+			// Deprecate (expire) the preview trial
+			if (
+				subscription.previewTrial?.expiresOn == null ||
+				new Date(subscription.previewTrial.expiresOn) >= new Date()
+			) {
+				subscription.previewTrial = {
+					startedOn: subscription.previewTrial?.startedOn ?? new Date(0).toISOString(),
+					...subscription.previewTrial,
+					expiresOn: new Date(0).toISOString(),
+				};
+			}
 		}
 
 		return subscription;
@@ -1010,6 +1440,17 @@ export class SubscriptionService implements Disposable {
 			v: 1,
 			data: { ...subscription, lastValidatedAt: this._lastValidatedDate?.getTime() },
 		});
+	}
+
+	private getStoredFeaturePreview(feature: FeaturePreviews): FeaturePreview {
+		return {
+			feature: feature,
+			usages: this.container.storage.get(`plus:preview:${feature}:usages`, []),
+		};
+	}
+
+	private storeFeaturePreview(feature: FeaturePreviews, usages: StoredFeaturePreviewUsagePeriod[]): Promise<void> {
+		return this.container.storage.store(`plus:preview:${feature}:usages`, usages);
 	}
 
 	private _cancellationSource: CancellationTokenSource | undefined;
@@ -1034,7 +1475,7 @@ export class SubscriptionService implements Disposable {
 			state,
 		} = this._subscription;
 
-		void setContext('gitlens:plus', actual.id != SubscriptionPlanId.Free ? actual.id : undefined);
+		void setContext('gitlens:plus', actual.id !== SubscriptionPlanId.Community ? actual.id : undefined);
 		void setContext('gitlens:plus:state', state);
 	}
 
@@ -1073,17 +1514,18 @@ export class SubscriptionService implements Disposable {
 		const {
 			account,
 			plan: { effective },
-			state,
 		} = this._subscription;
 
-		if (effective.id === SubscriptionPlanId.Free) {
+		if (effective.id === SubscriptionPlanId.Community) {
 			this._statusBarSubscription?.dispose();
 			this._statusBarSubscription = undefined;
 			return;
 		}
 
 		const trial = isSubscriptionTrial(this._subscription);
-		if (!trial && account?.verified !== false) {
+		const trialEligible = this._subscription.state === SubscriptionState.ProTrialReactivationEligible;
+
+		if (!(trial || trialEligible) && account?.verified !== false) {
 			this._statusBarSubscription?.dispose();
 			this._statusBarSubscription = undefined;
 			return;
@@ -1092,44 +1534,42 @@ export class SubscriptionService implements Disposable {
 		if (this._statusBarSubscription == null) {
 			this._statusBarSubscription = window.createStatusBarItem(
 				'gitlens.plus.subscription',
-				StatusBarAlignment.Left,
-				1,
+				StatusBarAlignment.Right,
 			);
 		}
 
-		this._statusBarSubscription.name = 'GitKraken Subscription';
+		this._statusBarSubscription.name = 'GitLens Pro';
+		this._statusBarSubscription.text = '$(gitlens-gitlens)';
 		this._statusBarSubscription.command = Commands.ShowAccountView;
+		this._statusBarSubscription.backgroundColor = undefined;
 
 		if (account?.verified === false) {
-			this._statusBarSubscription.text = `$(warning) ${effective.name} (Unverified)`;
+			this._statusBarSubscription.text = `$(gitlens-gitlens)\u00a0\u00a0$(warning)`;
 			this._statusBarSubscription.backgroundColor = new ThemeColor(
 				'statusBarItem.warningBackground' satisfies CoreColors,
 			);
 			this._statusBarSubscription.tooltip = new MarkdownString(
 				trial
-					? `**Please verify your email**\n\nYou must verify your email before you can start your **${effective.name}** trial.\n\nClick for details`
-					: `**Please verify your email**\n\nYou must verify your email before you can use Pro features on privately hosted repos.\n\nClick for details`,
+					? `**GitLens Pro — verify your email**\n\nYou must verify your email before you can start your **${effective.name}** trial.`
+					: `**GitLens Pro — verify your email**\n\nYou must verify your email before you can use Pro features on privately-hosted repos.`,
 				true,
 			);
 		} else {
-			const remaining = getSubscriptionTimeRemaining(this._subscription, 'days');
-			const isReactivatedTrial =
-				state === SubscriptionState.FreePlusInTrial && effective.trialReactivationCount > 0;
+			let tooltip;
+			if (trialEligible) {
+				tooltip = `**GitLens Pro — reactivate your Pro trial**\n\nExperience full access to all the [new Pro features](${
+					urls.releaseNotes
+				}) — free for another ${pluralize('day', proTrialLengthInDays)}.`;
+			} else if (trial) {
+				const remaining = getSubscriptionTimeRemaining(this._subscription, 'days') ?? 0;
+				tooltip = `**GitLens Pro — trial**\n\nYou now have full access to all GitLens Pro features for ${pluralize(
+					'day',
+					remaining,
+					{ infix: ' more ' },
+				)}.`;
+			}
 
-			this._statusBarSubscription.text = `${effective.name} (Trial)`;
-			this._statusBarSubscription.tooltip = new MarkdownString(
-				`${
-					isReactivatedTrial
-						? `[See what's new](https://help.gitkraken.com/gitlens/gitlens-release-notes-current/) with
-			${pluralize('day', remaining ?? 0, {
-				infix: ' more ',
-			})}
-			in your **${effective.name}** trial.`
-						: `You have ${pluralize('day', remaining ?? 0)} remaining in your **${effective.name}** trial.`
-				} Once your trial ends, you'll need a paid plan to continue using ✨ features.\n\nTry our
-			[other developer tools](https://www.gitkraken.com/suite) also included in your trial.`,
-				true,
-			);
+			this._statusBarSubscription.tooltip = new MarkdownString(tooltip, true);
 		}
 
 		this._statusBarSubscription.show();
@@ -1137,9 +1577,7 @@ export class SubscriptionService implements Disposable {
 
 	async switchOrganization(): Promise<void> {
 		const scope = getLogScope();
-
-		const checkInData = await this._getCheckInData();
-		if (checkInData == null) return;
+		if (this._session == null) return;
 
 		let organizations;
 		try {
@@ -1160,7 +1598,7 @@ export class SubscriptionService implements Disposable {
 
 		const pick = await window.showQuickPick(picks, {
 			title: 'Switch Organization',
-			placeHolder: 'Select the active organization for your GitKraken account',
+			placeHolder: 'Select the active organization for your account',
 		});
 
 		const currentActiveOrganization = this._subscription?.activeOrganization;
@@ -1171,6 +1609,10 @@ export class SubscriptionService implements Disposable {
 		if (currentActiveOrganization != null && pick.org.id === currentActiveOrganization.id) {
 			return;
 		}
+
+		await this.checkInAndValidate(this._session, { force: true, organizationId: pick.org.id });
+		const checkInData = await this._getCheckInData();
+		if (checkInData == null) return;
 
 		const organizationSubscription = getSubscriptionFromCheckIn(checkInData, organizations, pick.org.id);
 
@@ -1186,31 +1628,132 @@ export class SubscriptionService implements Disposable {
 			{ store: true },
 		);
 	}
+
+	onLoginUri(uri: Uri) {
+		const scope = getLogScope();
+		const queryParams = new URLSearchParams(uri.query);
+		const code = queryParams.get('code');
+		const state = queryParams.get('state');
+		const context = queryParams.get('context');
+		let contextMessage = 'sign in to GitKraken';
+
+		switch (context) {
+			case 'start_trial':
+				contextMessage = 'start a Pro trial';
+				break;
+		}
+
+		if (code == null) {
+			Logger.error(undefined, scope, `No code provided. Link: ${uri.toString(true)}`);
+			void window.showErrorMessage(
+				`Unable to ${contextMessage} with that link. Please try clicking the link again. If this issue persists, please contact support.`,
+			);
+			return;
+		}
+
+		void this.loginWithCode({ code: code, state: state ?? undefined }, { source: 'deeplink' });
+	}
+
+	async checkUpdatedSubscription(): Promise<SubscriptionState | undefined> {
+		if (this._session == null) return undefined;
+		const oldSubscriptionState = this._subscription.state;
+		await this.checkInAndValidate(this._session, { force: true });
+		if (oldSubscriptionState !== this._subscription.state) {
+			void this.showPlanMessage({ source: 'subscription' });
+		}
+
+		return this._subscription.state;
+	}
 }
 
-function flattenSubscription(subscription: Optional<Subscription, 'state'> | undefined, prefix?: string) {
-	if (subscription == null) return {};
+function flattenFeaturePreview(preview: FeaturePreview): FeaturePreviewEventData {
+	const status = getFeaturePreviewStatus(preview);
+	if (status === 'eligible') {
+		return {
+			feature: preview.feature,
+			status: status,
+		};
+	}
 
 	return {
-		...flatten(subscription.account, {
-			arrays: 'join',
-			prefix: `${prefix ? `${prefix}.` : ''}account`,
-			skipPaths: ['name', 'email'],
-			skipNulls: true,
-			stringify: true,
-		}),
-		...flatten(subscription.plan, {
-			prefix: `${prefix ? `${prefix}.` : ''}subscription`,
-			skipPaths: ['actual.name', 'effective.name'],
-			skipNulls: true,
-			stringify: true,
-		}),
-		...flatten(subscription.previewTrial, {
-			prefix: `${prefix ? `${prefix}.` : ''}subscription.previewTrial`,
-			skipPaths: ['actual.name', 'effective.name'],
-			skipNulls: true,
-			stringify: true,
-		}),
-		'subscription.state': subscription.state,
+		feature: preview.feature,
+		status: status,
+		day: preview.usages.length,
+		startedOn: preview.usages[0].startedOn,
+		...Object.fromEntries(
+			preview.usages.map<EntriesType<FeaturePreviewDayEventData>>((d, i) => [
+				`day.${i + 1}.startedOn`,
+				d.startedOn,
+			]),
+		),
 	};
+}
+
+function flattenSubscription(
+	subscription: Optional<Subscription, 'state'> | undefined,
+	prefix?: string,
+	featurePreviews?: FeaturePreview[] | undefined,
+): SubscriptionEventData {
+	if (subscription == null) return {};
+
+	let state = subscription.state;
+	// Normalize preview states to community since we deprecated the preview
+	if (state === SubscriptionState.ProPreview || state === SubscriptionState.ProPreviewExpired) {
+		state = SubscriptionState.Community;
+	}
+
+	const flattenedFeaturePreviews = featurePreviews != null ? flattenSubscriptionFeaturePreviews(featurePreviews) : {};
+
+	return {
+		...flatten(subscription.account, `${prefix ? `${prefix}.` : ''}account`, {
+			joinArrays: true,
+			skipPaths: ['name', 'email'],
+		}),
+		...flatten(subscription.plan, `${prefix ? `${prefix}.` : ''}subscription`, {
+			skipPaths: ['actual.name', 'effective.name'],
+		}),
+		...flatten(subscription.previewTrial, `${prefix ? `${prefix}.` : ''}subscription.previewTrial`, {
+			skipPaths: ['actual.name', 'effective.name'],
+		}),
+		'subscription.state': state,
+		'subscription.stateString': getSubscriptionStateString(state),
+		...flattenedFeaturePreviews,
+	};
+}
+
+function flattenSubscriptionFeaturePreviews(previews: FeaturePreview[]): SubscriptionFeaturePreviewsEventData {
+	const flattened: SubscriptionFeaturePreviewsEventData = Object.create(null);
+
+	for (const fp of previews) {
+		// Strip the `feature` property from the flattened object, since we put it in the key
+		const { feature, ...props } = flattenFeaturePreview(fp);
+		Object.assign(flattened, flatten(props, `subscription.featurePreviews.${fp.feature}`));
+	}
+
+	return flattened;
+}
+
+function getTrackingContextFromSource(source: Source | undefined): TrackingContext | undefined {
+	switch (source?.source) {
+		case 'graph':
+			return 'graph';
+		case 'launchpad':
+			return 'launchpad';
+		case 'timeline':
+			return 'visual_file_history';
+		case 'quick-wizard':
+			if (source.detail != null && typeof source.detail !== 'string' && 'action' in source.detail) {
+				switch (source.detail.action) {
+					case 'worktree':
+						return 'worktrees';
+					case 'launchpad':
+						return 'launchpad';
+				}
+			}
+			break;
+		case 'worktrees':
+			return 'worktrees';
+	}
+
+	return undefined;
 }

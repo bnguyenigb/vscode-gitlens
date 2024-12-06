@@ -1,6 +1,7 @@
 import type { TextEditor, Uri } from 'vscode';
 import { Range } from 'vscode';
-import { Commands, GlyphChars } from '../constants';
+import { GlyphChars } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { GitUri } from '../git/gitUri';
 import { getBranchNameWithoutRemote, getRemoteNameFromBranchName } from '../git/models/branch';
@@ -8,10 +9,10 @@ import { isSha } from '../git/models/reference';
 import { RemoteResourceType } from '../git/models/remoteResource';
 import { showGenericErrorMessage } from '../messages';
 import { showReferencePicker } from '../quickpicks/referencePicker';
-import { command, executeCommand } from '../system/command';
 import { UriComparer } from '../system/comparers';
 import { Logger } from '../system/logger';
 import { pad, splitSingle } from '../system/string';
+import { command, executeCommand } from '../system/vscode/command';
 import { StatusFileNode } from '../views/nodes/statusFileNode';
 import type { CommandContext } from './base';
 import {
@@ -178,17 +179,8 @@ export class OpenFileOnRemoteCommand extends ActiveEditorCommand {
 					if (pick == null) return;
 
 					if (pick.refType === 'branch') {
-						if (pick.remote) {
-							args.branchOrTag = getBranchNameWithoutRemote(pick.name);
-
-							const remoteName = getRemoteNameFromBranchName(pick.name);
-							const remote = remotes.find(r => r.name === remoteName);
-							if (remote != null) {
-								remotes = [remote];
-							}
-						} else {
-							args.branchOrTag = pick.name;
-						}
+						branch = pick;
+						args.branchOrTag = undefined;
 						sha = undefined;
 					} else if (pick.refType === 'tag') {
 						args.branchOrTag = pick.ref;
@@ -197,8 +189,21 @@ export class OpenFileOnRemoteCommand extends ActiveEditorCommand {
 						args.branchOrTag = undefined;
 						sha = pick.ref;
 					}
-				} else {
-					args.branchOrTag = branch.name;
+				}
+
+				if (branch != null) {
+					if (branch.remote || (branch.upstream != null && !branch.upstream.missing)) {
+						const name = branch.remote ? branch.name : branch.upstream!.name;
+						args.branchOrTag = getBranchNameWithoutRemote(name);
+
+						const remoteName = getRemoteNameFromBranchName(name);
+						const remote = remotes.find(r => r.name === remoteName);
+						if (remote != null) {
+							remotes = [remote];
+						}
+					} else {
+						args.branchOrTag = branch.name;
+					}
 				}
 			}
 

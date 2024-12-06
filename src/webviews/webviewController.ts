@@ -1,18 +1,19 @@
+import { getNonce } from '@env/crypto';
 import type { ViewBadge, Webview, WebviewPanel, WebviewView, WindowState } from 'vscode';
 import { Disposable, EventEmitter, Uri, ViewColumn, window, workspace } from 'vscode';
-import { getNonce } from '@env/crypto';
-import type { Commands, CustomEditorTypes, WebviewTypes, WebviewViewTypes } from '../constants';
+import type { Commands } from '../constants.commands';
+import type { WebviewTelemetryContext } from '../constants.telemetry';
+import type { CustomEditorTypes, WebviewTypes, WebviewViewTypes } from '../constants.views';
 import type { Container } from '../container';
-import { pauseOnCancelOrTimeout } from '../system/cancellation';
-import { executeCommand, executeCoreCommand } from '../system/command';
-import { setContext } from '../system/context';
 import { getScopedCounter } from '../system/counter';
 import { debug, logName } from '../system/decorators/log';
 import { serialize } from '../system/decorators/serialize';
-import { Logger } from '../system/logger';
+import { getLoggableName, Logger } from '../system/logger';
 import { getLogScope, getNewLogScope, setLogScopeExit } from '../system/logger.scope';
-import { isPromise } from '../system/promise';
-import { maybeStopWatch } from '../system/stopwatch';
+import { pauseOnCancelOrTimeout } from '../system/promise';
+import { maybeStopWatch, Stopwatch } from '../system/stopwatch';
+import { executeCommand, executeCoreCommand } from '../system/vscode/command';
+import { setContext } from '../system/vscode/context';
 import type { WebviewContext } from '../system/webview';
 import type {
 	IpcCallMessageType,
@@ -24,7 +25,14 @@ import type {
 	WebviewFocusChangedParams,
 	WebviewState,
 } from './protocol';
-import { ExecuteCommand, WebviewFocusChangedCommand, WebviewReadyCommand } from './protocol';
+import {
+	DidChangeHostWindowFocusNotification,
+	DidChangeWebviewFocusNotification,
+	ExecuteCommand,
+	TelemetrySendEventCommand,
+	WebviewFocusChangedCommand,
+	WebviewReadyCommand,
+} from './protocol';
 import type { WebviewCommandCallback, WebviewCommandRegistrar } from './webviewCommandRegistrar';
 import type { WebviewHost, WebviewProvider, WebviewShowingArgs } from './webviewProvider';
 import type { WebviewPanelDescriptor, WebviewShowOptions, WebviewViewDescriptor } from './webviewsController';
@@ -190,6 +198,15 @@ export class WebviewController<
 		this._initializing = undefined;
 	}
 
+	getTelemetryContext(): WebviewTelemetryContext {
+		return {
+			'context.webview.id': this.id,
+			'context.webview.type': this.descriptor.type,
+			'context.webview.instanceId': this.instanceId,
+			'context.webview.host': this.isHost('editor') ? ('editor' as const) : ('view' as const),
+		};
+	}
+
 	isHost(type: 'editor'): this is WebviewPanelController<State, SerializedState, ShowingArgs>;
 	isHost(type: 'view'): this is WebviewViewController<State, SerializedState, ShowingArgs>;
 	isHost(
@@ -274,11 +291,23 @@ export class WebviewController<
 			options = {};
 		}
 
-		const result = this.provider.onShowing?.(loading, options, ...args);
+		const eventBase = {
+			...this.getTelemetryContext(),
+			loading: loading,
+		};
+
+		using sw = new Stopwatch(`WebviewController.show(${this.id})`);
+
+		let context;
+		const result = await this.provider.onShowing?.(loading, options, ...args);
 		if (result != null) {
-			if (isPromise(result)) {
-				if ((await result) === false) return;
-			} else if (result === false) {
+			let show;
+			[show, context] = result;
+			if (show === false) {
+				this.container.telemetry.sendEvent(`${this.descriptor.type}/showAborted`, {
+					...eventBase,
+					duration: sw.elapsed(),
+				});
 				return;
 			}
 		}
@@ -302,6 +331,12 @@ export class WebviewController<
 		}
 
 		setContextKeys(this.descriptor.contextKeyPrefix);
+
+		this.container.telemetry.sendEvent(`${this.descriptor.type}/shown`, {
+			...eventBase,
+			duration: sw.elapsed(),
+			...context,
+		});
 	}
 
 	get baseWebviewState(): WebviewState {
@@ -381,6 +416,14 @@ export class WebviewController<
 				}
 				break;
 
+			case TelemetrySendEventCommand.is(e):
+				this.container.telemetry.sendEvent(
+					e.params.name,
+					{ ...e.params.data, ...(this.provider.getTelemetryContext?.() ?? this.getTelemetryContext()) },
+					e.params.source,
+				);
+				break;
+
 			default:
 				this.provider.onMessageReceived?.(e);
 				break;
@@ -392,7 +435,7 @@ export class WebviewController<
 	})
 	onViewFocusChanged(e: WebviewFocusChangedParams): void {
 		setContextKeys(this.descriptor.contextKeyPrefix);
-		this.provider.onFocusChanged?.(e.focused);
+		this.handleFocusChanged(e.focused);
 	}
 
 	@debug()
@@ -419,7 +462,7 @@ export class WebviewController<
 			if (active != null) {
 				this.provider.onActiveChanged?.(active);
 				if (!active) {
-					this.provider.onFocusChanged?.(false);
+					this.handleFocusChanged(false);
 				}
 			}
 		} else {
@@ -428,7 +471,7 @@ export class WebviewController<
 			if (active != null) {
 				this.provider.onActiveChanged?.(false);
 			}
-			this.provider.onFocusChanged?.(false);
+			this.handleFocusChanged(false);
 		}
 
 		this.provider.onVisibilityChanged?.(visible);
@@ -437,7 +480,13 @@ export class WebviewController<
 	private onWindowStateChanged(e: WindowState) {
 		if (!this.visible) return;
 
+		void this.notify(DidChangeHostWindowFocusNotification, { focused: e.focused });
 		this.provider.onWindowFocusChanged?.(e.focused);
+	}
+
+	private handleFocusChanged(focused: boolean) {
+		void this.notify(DidChangeWebviewFocusNotification, { focused: focused });
+		this.provider.onFocusChanged?.(focused);
 	}
 
 	getRootUri() {
@@ -500,12 +549,13 @@ export class WebviewController<
 	): Promise<boolean> {
 		let packed;
 		if (notificationType.pack && params != null) {
-			const scope = getLogScope();
-
-			const sw = maybeStopWatch(getNewLogScope(` serializing msg=${notificationType.method}`, scope), {
-				log: false,
-				logLevel: 'debug',
-			});
+			const sw = maybeStopWatch(
+				getNewLogScope(`${getLoggableName(this)}.notify serializing msg=${notificationType.method}`, true),
+				{
+					log: false,
+					logLevel: 'debug',
+				},
+			);
 			packed = utf8TextEncoder.encode(JSON.stringify(params));
 			sw?.stop();
 		}
@@ -554,9 +604,9 @@ export class WebviewController<
 					clearTimeout(timeout);
 					return s;
 				},
-				ex => {
+				(ex: unknown) => {
 					clearTimeout(timeout);
-					Logger.error(scope, ex);
+					Logger.error(ex, scope);
 					debugger;
 					return false;
 				},
@@ -646,13 +696,15 @@ export function replaceWebviewHtmlTokens<SerializedState>(
 	endOfBody?: string,
 ) {
 	return html.replace(
-		/#{(head|body|endOfBody|webviewId|webviewInstanceId|placement|cspSource|cspNonce|root|webroot)}/g,
+		/#{(head|body|endOfBody|webviewId|webviewInstanceId|placement|cspSource|cspNonce|root|webroot|state)}/g,
 		(_substring: string, token: string) => {
 			switch (token) {
 				case 'head':
 					return head ?? '';
 				case 'body':
 					return body ?? '';
+				case 'state':
+					return bootstrap != null ? JSON.stringify(bootstrap).replace(/"/g, '&quot;') : '';
 				case 'endOfBody':
 					return `${
 						bootstrap != null

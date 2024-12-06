@@ -3,9 +3,10 @@ import { env, ThemeIcon, Uri, window } from 'vscode';
 import type { OpenOnRemoteCommandArgs } from '../commands/openOnRemote';
 import { SetRemoteAsDefaultQuickInputButton } from '../commands/quickCommand.buttons';
 import type { Keys } from '../constants';
-import { Commands, GlyphChars } from '../constants';
+import { GlyphChars } from '../constants';
+import { Commands } from '../constants.commands';
 import { Container } from '../container';
-import { getBranchNameWithoutRemote, getRemoteNameFromBranchName } from '../git/models/branch';
+import { getBranchNameWithoutRemote, getDefaultBranchName, getRemoteNameFromBranchName } from '../git/models/branch';
 import type { GitRemote } from '../git/models/remote';
 import { getHighlanderProviders } from '../git/models/remote';
 import type { RemoteResource } from '../git/models/remoteResource';
@@ -13,7 +14,7 @@ import { getNameFromRemoteResource, RemoteResourceType } from '../git/models/rem
 import type { RemoteProvider } from '../git/remotes/remoteProvider';
 import { filterMap } from '../system/array';
 import { getSettledValue } from '../system/promise';
-import { getQuickPickIgnoreFocusOut } from '../system/utils';
+import { getQuickPickIgnoreFocusOut } from '../system/vscode/utils';
 import { CommandQuickPickItem } from './items/common';
 
 export class ConfigureCustomRemoteProviderCommandQuickPickItem extends CommandQuickPickItem {
@@ -56,14 +57,9 @@ export class CopyOrOpenRemoteCommandQuickPickItem extends CommandQuickPickItem {
 				} else if (resource.type === RemoteResourceType.CreatePullRequest) {
 					let branch = resource.base.branch;
 					if (branch == null) {
-						branch = await Container.instance.git.getDefaultBranchName(
-							this.remote.repoPath,
-							this.remote.name,
-						);
-						if (branch == null && this.remote.hasIntegration()) {
-							const provider = await Container.instance.integrations.getByRemote(this.remote);
-							const defaultBranch = await provider?.getDefaultBranch?.(this.remote.provider.repoDesc);
-							branch = defaultBranch?.name;
+						branch = await getDefaultBranchName(Container.instance, this.remote.repoPath, this.remote.name);
+						if (branch) {
+							branch = getBranchNameWithoutRemote(branch);
 						}
 					}
 

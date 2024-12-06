@@ -1,10 +1,10 @@
 import { Disposable, window } from 'vscode';
 import type { Container } from '../../../container';
-import { setContext } from '../../../system/context';
 import { gate } from '../../../system/decorators/gate';
 import { once } from '../../../system/function';
 import { Logger } from '../../../system/logger';
 import { getLogScope } from '../../../system/logger.scope';
+import { setContext } from '../../../system/vscode/context';
 import type { ServerConnection } from '../serverConnection';
 import type {
 	FullOrganization,
@@ -79,7 +79,11 @@ export class OrganizationService implements Disposable {
 
 			if (!rsp.ok) {
 				debugger;
-				Logger.error('', scope, `Unable to get organizations; status=(${rsp.status}): ${rsp.statusText}`);
+				Logger.error(
+					undefined,
+					scope,
+					`Unable to get organizations; status=(${rsp.status}): ${rsp.statusText}`,
+				);
 
 				void window.showErrorMessage(`Unable to get organizations; Status: ${rsp.statusText}`, 'OK');
 
@@ -148,16 +152,7 @@ export class OrganizationService implements Disposable {
 		options?: { force?: boolean },
 	): Promise<FullOrganization | undefined> {
 		if (!this._fullOrganizations?.has(id) || options?.force === true) {
-			const session = await this.container.subscription.getAuthenticationSession();
-
-			const rsp = await this.connection.fetchApi(
-				`organization/${id}`,
-				{
-					method: 'GET',
-				},
-				{ token: session?.accessToken },
-			);
-
+			const rsp = await this.connection.fetchApi(`organization/${id}`, { method: 'GET' });
 			if (!rsp.ok) {
 				Logger.error(
 					'',
@@ -178,13 +173,25 @@ export class OrganizationService implements Disposable {
 	}
 
 	@gate()
-	async getOrganizationMembers(id: string, options?: { force?: boolean }): Promise<OrganizationMember[]> {
-		const organization = await this.getFullOrganization(id, options);
-		if (organization != null) {
-			return organization.members;
+	async getMembers(
+		organizationId?: string | undefined,
+		options?: { force?: boolean },
+	): Promise<OrganizationMember[]> {
+		if (organizationId == null) {
+			organizationId = await this.getActiveOrganizationId();
+			if (organizationId == null) return [];
 		}
 
-		return [];
+		const organization = await this.getFullOrganization(organizationId, options);
+		return organization?.members ?? [];
+	}
+
+	async getMemberById(id: string, organizationId: string): Promise<OrganizationMember | undefined> {
+		return (await this.getMembers(organizationId)).find(m => m.id === id);
+	}
+
+	async getMembersByIds(ids: string[], organizationId: string): Promise<OrganizationMember[]> {
+		return (await this.getMembers(organizationId)).filter(m => ids.includes(m.id));
 	}
 
 	private async getActiveOrganizationId(cached = true): Promise<string | undefined> {
@@ -206,16 +213,11 @@ export class OrganizationService implements Disposable {
 		if (id == null) return undefined;
 
 		if (!this._organizationSettings?.has(id) || options?.force === true) {
-			const session = await this.container.subscription.getAuthenticationSession();
-
 			const rsp = await this.connection.fetchApi(
 				`v1/organizations/settings`,
-				{
-					method: 'GET',
-				},
-				{ token: session?.accessToken },
+				{ method: 'GET' },
+				{ organizationId: id },
 			);
-
 			if (!rsp.ok) {
 				Logger.error(
 					'',

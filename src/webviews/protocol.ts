@@ -1,4 +1,6 @@
+import type { TimeInput } from '@opentelemetry/api';
 import type { Config } from '../config';
+import type { Source, TelemetryEvents, TelemetryEventsFromWebviewApp } from '../constants.telemetry';
 import type {
 	CustomEditorIds,
 	CustomEditorTypes,
@@ -6,8 +8,8 @@ import type {
 	WebviewTypes,
 	WebviewViewIds,
 	WebviewViewTypes,
-} from '../constants';
-import type { ConfigPath, ConfigPathValue, Path, PathValue } from '../system/configuration';
+} from '../constants.views';
+import type { ConfigPath, ConfigPathValue, Path, PathValue } from '../system/vscode/configuration';
 
 export type IpcScope = 'core' | CustomEditorTypes | WebviewTypes | WebviewViewTypes;
 
@@ -57,12 +59,7 @@ export class IpcRequest<Params = void, ResponseParams = void> extends IpcCall<Pa
 	constructor(scope: IpcScope, method: string, reset?: boolean, pack?: boolean) {
 		super(scope, method, reset, pack);
 
-		this.response = new IpcNotification<ResponseParams>(
-			this.scope,
-			`${this.method}/completion`,
-			this.reset,
-			this.pack,
-		);
+		this.response = new IpcNotification<ResponseParams>(this.scope, `${method}/completion`, this.reset, this.pack);
 	}
 }
 
@@ -73,13 +70,13 @@ export class IpcNotification<Params = void> extends IpcCall<Params> {}
 
 // COMMANDS
 
-export const WebviewReadyCommand = new IpcCommand('core', 'ready');
+export const WebviewReadyCommand = new IpcCommand('core', 'webview/ready');
 
 export interface WebviewFocusChangedParams {
 	focused: boolean;
 	inputFocused: boolean;
 }
-export const WebviewFocusChangedCommand = new IpcCommand<WebviewFocusChangedParams>('core', 'focus/changed');
+export const WebviewFocusChangedCommand = new IpcCommand<WebviewFocusChangedParams>('core', 'webview/focus/changed');
 
 export interface ExecuteCommandParams {
 	command: string;
@@ -97,7 +94,32 @@ export interface UpdateConfigurationParams {
 }
 export const UpdateConfigurationCommand = new IpcCommand<UpdateConfigurationParams>('core', 'configuration/update');
 
+export interface TelemetrySendEventParams<T extends keyof TelemetryEvents = keyof TelemetryEvents> {
+	name: T;
+	data: TelemetryEventsFromWebviewApp[T];
+	source?: Source;
+	startTime?: TimeInput;
+	endTime?: TimeInput;
+}
+export const TelemetrySendEventCommand = new IpcCommand<TelemetrySendEventParams>('core', 'telemetry/sendEvent');
+
 // NOTIFICATIONS
+
+export interface DidChangeHostWindowFocusParams {
+	focused: boolean;
+}
+export const DidChangeHostWindowFocusNotification = new IpcNotification<DidChangeHostWindowFocusParams>(
+	'core',
+	'window/focus/didChange',
+);
+
+export interface DidChangeWebviewFocusParams {
+	focused: boolean;
+}
+export const DidChangeWebviewFocusNotification = new IpcCommand<DidChangeWebviewFocusParams>(
+	'core',
+	'webview/focus/didChange',
+);
 
 export interface DidChangeConfigurationParams {
 	config: Config;
@@ -130,7 +152,7 @@ export function isCustomConfigKey(key: string): key is CustomConfigPath {
 }
 
 export function assertsConfigKeyValue<T extends ConfigPath>(
-	key: T,
+	_key: T,
 	value: unknown,
 ): asserts value is ConfigPathValue<T> {
 	// Noop

@@ -5,17 +5,19 @@ import type { PatchRevisionRange } from '../../../git/models/patch';
 import type { Repository } from '../../../git/models/repository';
 import type {
 	Draft,
+	DraftArchiveReason,
 	DraftPatch,
 	DraftPatchFileChange,
 	DraftPendingUser,
 	DraftRole,
+	DraftType,
 	DraftUser,
 	DraftVisibility,
 	LocalDraft,
 } from '../../../gk/models/drafts';
 import type { GkRepositoryId } from '../../../gk/models/repositoryIdentities';
 import type { DateTimeFormat } from '../../../system/date';
-import type { Serialized } from '../../../system/serialize';
+import type { Serialized } from '../../../system/vscode/serialize';
 import type { IpcScope, WebviewState } from '../../../webviews/protocol';
 import { IpcCommand, IpcNotification, IpcRequest } from '../../../webviews/protocol';
 import type { OrganizationMember } from '../../gk/account/organization';
@@ -67,6 +69,7 @@ export interface CloudDraftDetails {
 	draftType: 'cloud';
 
 	id: string;
+	type: DraftType;
 	createdAt: number;
 	updatedAt: number;
 	author: {
@@ -81,6 +84,11 @@ export interface CloudDraftDetails {
 
 	title: string;
 	description?: string;
+
+	isArchived: boolean;
+	archivedReason?: DraftArchiveReason;
+
+	gkDevLink?: string;
 
 	patches?: PatchDetails[];
 
@@ -133,6 +141,15 @@ export interface RevisionChange {
 
 export type Change = WipChange | RevisionChange;
 
+export interface CreatePatchState {
+	title?: string;
+	description?: string;
+	changes: Record<string, Change>;
+	creationError?: string;
+	visibility: DraftVisibility;
+	userSelections?: DraftUserSelection[];
+}
+
 export interface State extends WebviewState {
 	mode: Mode;
 
@@ -143,14 +160,7 @@ export interface State extends WebviewState {
 	};
 
 	draft?: DraftDetails;
-	create?: {
-		title?: string;
-		description?: string;
-		changes: Record<string, Change>;
-		creationError?: string;
-		visibility: DraftVisibility;
-		userSelections?: DraftUserSelection[];
-	};
+	create?: CreatePatchState;
 }
 
 export type ShowCommitDetailsViewCommandArgs = string[];
@@ -164,6 +174,11 @@ export interface ApplyPatchParams {
 	selected: PatchDetails['id'][];
 }
 export const ApplyPatchCommand = new IpcCommand<ApplyPatchParams>(scope, 'apply');
+
+export interface ArchiveDraftParams {
+	reason?: Exclude<DraftArchiveReason, 'committed'>;
+}
+export const ArchiveDraftCommand = new IpcCommand<ArchiveDraftParams>(scope, 'archive');
 
 export interface CreatePatchParams {
 	title: string;
@@ -254,11 +269,20 @@ export const UpdatePatchUserSelectionCommand = new IpcCommand<UpdatePatchUserSel
 
 export type DidExplainParams =
 	| {
-			summary: string | undefined;
-			error?: undefined;
+			result: { summary: string; body: string };
+			error?: never;
 	  }
 	| { error: { message: string } };
 export const ExplainRequest = new IpcRequest<void, DidExplainParams>(scope, 'explain');
+
+export type DidGenerateParams =
+	| {
+			title: string | undefined;
+			description: string | undefined;
+			error?: undefined;
+	  }
+	| { error: { message: string } };
+export const GenerateRequest = new IpcRequest<void, DidGenerateParams>(scope, 'generate');
 
 // NOTIFICATIONS
 

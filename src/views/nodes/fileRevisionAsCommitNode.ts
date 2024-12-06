@@ -1,8 +1,8 @@
-import type { CancellationToken, Command, Selection } from 'vscode';
-import { MarkdownString, ThemeColor, ThemeIcon, TreeItem, TreeItemCollapsibleState, Uri } from 'vscode';
+import type { CancellationToken, Command, Selection, Uri } from 'vscode';
+import { MarkdownString, ThemeColor, ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
 import type { DiffWithPreviousCommandArgs } from '../../commands/diffWithPrevious';
-import type { Colors } from '../../constants';
-import { Commands } from '../../constants';
+import type { Colors } from '../../constants.colors';
+import { Commands } from '../../constants.commands';
 import type { Container } from '../../container';
 import { CommitFormatter } from '../../git/formatters/commitFormatter';
 import { StatusFileFormatter } from '../../git/formatters/statusFormatter';
@@ -12,13 +12,13 @@ import type { GitCommit } from '../../git/models/commit';
 import type { GitFile } from '../../git/models/file';
 import { getGitFileStatusIcon } from '../../git/models/file';
 import type { GitRevisionReference } from '../../git/models/reference';
-import { pauseOnCancelOrTimeoutMapTuplePromise } from '../../system/cancellation';
-import { configuration } from '../../system/configuration';
 import { joinPaths } from '../../system/path';
-import { getSettledValue } from '../../system/promise';
+import { getSettledValue, pauseOnCancelOrTimeoutMapTuplePromise } from '../../system/promise';
+import { configuration } from '../../system/vscode/configuration';
 import type { FileHistoryView } from '../fileHistoryView';
 import type { LineHistoryView } from '../lineHistoryView';
 import type { ViewsWithCommits } from '../viewBase';
+import { createViewDecorationUri } from '../viewDecorationProvider';
 import type { ViewNode } from './abstract/viewNode';
 import { ContextValues } from './abstract/viewNode';
 import { ViewRefFileNode } from './abstract/viewRefNode';
@@ -108,7 +108,7 @@ export class FileRevisionAsCommitNode extends ViewRefFileNode<
 			messageTruncateAtNewLine: true,
 		});
 
-		item.resourceUri = Uri.parse(`gitlens-view://commit-file/status/${this.file.status}`);
+		item.resourceUri = createViewDecorationUri('commit-file', { status: this.file.status });
 
 		if (!this.commit.isUncommitted && this.view.config.avatars) {
 			item.iconPath = this._options.unpublished

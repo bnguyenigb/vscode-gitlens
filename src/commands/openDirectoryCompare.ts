@@ -1,12 +1,12 @@
 import type { TextEditor, Uri } from 'vscode';
-import { Commands } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { openDirectoryCompare } from '../git/actions/commit';
 import { showGenericErrorMessage } from '../messages';
 import { showReferencePicker } from '../quickpicks/referencePicker';
 import { getBestRepositoryOrShowPicker } from '../quickpicks/repositoryPicker';
-import { command } from '../system/command';
 import { Logger } from '../system/logger';
+import { command } from '../system/vscode/command';
 import { CompareResultsNode } from '../views/nodes/compareResultsNode';
 import type { CommandContext } from './base';
 import { ActiveEditorCommand, getCommandUri, isCommandContextViewNodeHasRef } from './base';
@@ -46,7 +46,7 @@ export class OpenDirectoryCompareCommand extends ActiveEditorCommand {
 				if (isCommandContextViewNodeHasRef(context)) {
 					args = { ...args };
 					args.ref1 = context.node.ref.ref;
-					args.ref2 = undefined;
+					args.ref2 = '';
 				}
 				break;
 		}

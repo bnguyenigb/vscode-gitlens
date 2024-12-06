@@ -55,7 +55,10 @@ export class BranchTrackingStatusFilesNode extends ViewNode<'tracking-status-fil
 	private async getGroupedFiles(): Promise<Map<string, GitFileWithCommit[]>> {
 		const log = await this.view.container.git.getLog(this.repoPath, {
 			limit: 0,
-			ref: createRevisionRange(this.ref2, this.ref1, this.direction === 'behind' ? '...' : '..'),
+			ref:
+				this.direction === 'behind'
+					? createRevisionRange(this.ref1, this.ref2, '..')
+					: createRevisionRange(this.ref2, this.ref1, '..'),
 		});
 		if (log == null) return new Map();
 
@@ -80,18 +83,7 @@ export class BranchTrackingStatusFilesNode extends ViewNode<'tracking-status-fil
 		const files = await this.getGroupedFiles();
 
 		let children: FileNode[] = [
-			...map(
-				files.values(),
-				files =>
-					new StatusFileNode(
-						this.view,
-						this,
-						files[files.length - 1],
-						this.repoPath,
-						files.map(s => s.commit),
-						this.direction,
-					),
-			),
+			...map(files.values(), files => new StatusFileNode(this.view, this, this.repoPath, files, this.direction)),
 		];
 
 		if (this.view.config.files.layout !== 'list') {

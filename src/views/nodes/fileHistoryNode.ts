@@ -5,7 +5,6 @@ import { deletedOrMissing } from '../../git/models/constants';
 import type { GitLog } from '../../git/models/log';
 import type { RepositoryChangeEvent, RepositoryFileSystemChangeEvent } from '../../git/models/repository';
 import { RepositoryChange, RepositoryChangeComparisonMode } from '../../git/models/repository';
-import { configuration } from '../../system/configuration';
 import { gate } from '../../system/decorators/gate';
 import { debug } from '../../system/decorators/log';
 import { memoize } from '../../system/decorators/memoize';
@@ -13,6 +12,7 @@ import { weakEvent } from '../../system/event';
 import { filterMap, flatMap, map, uniqueBy } from '../../system/iterable';
 import { Logger } from '../../system/logger';
 import { basename } from '../../system/path';
+import { configuration } from '../../system/vscode/configuration';
 import type { FileHistoryView } from '../fileHistoryView';
 import { SubscribeableViewNode } from './abstract/subscribeableViewNode';
 import type { PageableViewNode, ViewNode } from './abstract/viewNode';
@@ -70,9 +70,7 @@ export class FileHistoryNode
 				? this.view.container.git.getStatusForFiles(this.uri.repoPath, this.getPathOrGlob())
 				: undefined,
 			this.uri.sha == null ? this.view.container.git.getCurrentUser(this.uri.repoPath) : undefined,
-			this.branch != null
-				? this.view.container.git.getBranchesAndTagsTipsFn(this.uri.repoPath, this.branch.name)
-				: undefined,
+			this.view.container.git.getBranchesAndTagsTipsFn(this.uri.repoPath, this.branch?.name),
 			range
 				? this.view.container.git.getLogRefsOnly(this.uri.repoPath, {
 						limit: 0,
@@ -123,7 +121,7 @@ export class FileHistoryNode
 									c,
 									unpublishedCommits?.has(c.ref),
 									this.branch,
-									undefined,
+									getBranchAndTagTips,
 									{
 										expand: false,
 									},

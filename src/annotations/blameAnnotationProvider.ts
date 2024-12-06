@@ -6,9 +6,10 @@ import { GitUri } from '../git/gitUri';
 import type { GitBlame } from '../git/models/blame';
 import type { GitCommit } from '../git/models/commit';
 import { changesMessage, detailsMessage } from '../hovers/hovers';
-import { configuration } from '../system/configuration';
 import { log } from '../system/decorators/log';
+import { configuration } from '../system/vscode/configuration';
 import type { TrackedGitDocument } from '../trackers/trackedDocument';
+import type { DidChangeStatusCallback } from './annotationProvider';
 import { AnnotationProviderBase } from './annotationProvider';
 import type { ComputedHeatmap } from './annotations';
 import { getHeatmapColors } from './annotations';
@@ -21,11 +22,12 @@ export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase
 
 	constructor(
 		container: Container,
+		onDidChangeStatus: DidChangeStatusCallback,
 		annotationType: FileAnnotationType,
 		editor: TextEditor,
 		trackedDocument: TrackedGitDocument,
 	) {
-		super(container, annotationType, editor, trackedDocument);
+		super(container, onDidChangeStatus, annotationType, editor, trackedDocument);
 
 		this.blame = container.git.getBlame(this.trackedDocument.uri, editor.document);
 
@@ -39,7 +41,7 @@ export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase
 			this.hoverProviderDisposable.dispose();
 			this.hoverProviderDisposable = undefined;
 		}
-		super.clear();
+		return super.clear();
 	}
 
 	override async validate(): Promise<boolean> {

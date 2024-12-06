@@ -1,13 +1,14 @@
 import type { AuthenticationSession, CancellationToken } from 'vscode';
-import type { DynamicAutolinkReference } from '../../../annotations/autolinks';
-import type { AutolinkReference } from '../../../config';
+import type { AutolinkReference, DynamicAutolinkReference } from '../../../autolinks';
+import { IssueIntegrationId } from '../../../constants.integrations';
 import type { Account } from '../../../git/models/author';
 import type { IssueOrPullRequest, SearchedIssue } from '../../../git/models/issue';
 import { filterMap, flatten } from '../../../system/iterable';
+import { Logger } from '../../../system/logger';
 import type { IntegrationAuthenticationProviderDescriptor } from '../authentication/integrationAuthentication';
 import type { ResourceDescriptor } from '../integration';
 import { IssueIntegration } from '../integration';
-import { IssueFilter, IssueIntegrationId, providersMetadata, toAccount, toSearchedIssue } from './models';
+import { IssueFilter, providersMetadata, toAccount, toSearchedIssue } from './models';
 
 const metadata = providersMetadata[IssueIntegrationId.Jira];
 const authProvider = Object.freeze({ id: metadata.id, scopes: metadata.scopes });
@@ -40,15 +41,14 @@ export class JiraIntegration extends IssueIntegration<IssueIntegrationId.Jira> {
 	}
 
 	private _autolinks: Map<string, (AutolinkReference | DynamicAutolinkReference)[]> | undefined;
-	override autolinks(): (AutolinkReference | DynamicAutolinkReference)[] {
-		if (this._session == null || this._organizations == null || this._projects == null) return [];
-
-		this._autolinks ||= new Map<string, (AutolinkReference | DynamicAutolinkReference)[]>();
-
-		const cachedAutolinks = this._autolinks.get(this._session.accessToken);
-		if (cachedAutolinks != null) {
-			return cachedAutolinks;
+	override async autolinks(): Promise<(AutolinkReference | DynamicAutolinkReference)[]> {
+		const connected = this.maybeConnected ?? (await this.isConnected());
+		if (!connected || this._session == null || this._organizations == null || this._projects == null) {
+			return [];
 		}
+
+		const cachedAutolinks = this._autolinks?.get(this._session.accessToken);
+		if (cachedAutolinks != null) return cachedAutolinks;
 
 		const autolinks: (AutolinkReference | DynamicAutolinkReference)[] = [];
 		const organizations = this._organizations.get(this._session.accessToken);
@@ -59,10 +59,13 @@ export class JiraIntegration extends IssueIntegration<IssueIntegrationId.Jira> {
 					for (const project of projects) {
 						const prefix = `${project.key}-`;
 						autolinks.push({
-							type: 'issue',
-							url: `${organization.url}/browse/${prefix}<num>`,
 							prefix: prefix,
+							url: `${organization.url}/browse/${prefix}<num>`,
+							alphanumeric: false,
+							ignoreCase: false,
 							title: `Open Issue ${prefix}<num> on ${organization.name}`,
+
+							type: 'issue',
 							description: `${organization.name} Issue ${prefix}<num>`,
 							descriptor: { ...organization },
 						});
@@ -71,6 +74,7 @@ export class JiraIntegration extends IssueIntegration<IssueIntegrationId.Jira> {
 			}
 		}
 
+		this._autolinks ??= new Map<string, (AutolinkReference | DynamicAutolinkReference)[]>();
 		this._autolinks.set(this._session.accessToken, autolinks);
 
 		return autolinks;
@@ -94,7 +98,7 @@ export class JiraIntegration extends IssueIntegration<IssueIntegrationId.Jira> {
 		{ accessToken }: AuthenticationSession,
 		force: boolean = false,
 	): Promise<JiraOrganizationDescriptor[] | undefined> {
-		this._organizations ||= new Map<string, JiraOrganizationDescriptor[] | undefined>();
+		this._organizations ??= new Map<string, JiraOrganizationDescriptor[] | undefined>();
 
 		const cachedResources = this._organizations.get(accessToken);
 
@@ -116,7 +120,7 @@ export class JiraIntegration extends IssueIntegration<IssueIntegrationId.Jira> {
 		resources: JiraOrganizationDescriptor[],
 		force: boolean = false,
 	): Promise<JiraProjectDescriptor[] | undefined> {
-		this._projects ||= new Map<string, JiraProjectDescriptor[] | undefined>();
+		this._projects ??= new Map<string, JiraProjectDescriptor[] | undefined>();
 
 		let resourcesWithoutProjects = [];
 		if (force) {
@@ -229,15 +233,21 @@ export class JiraIntegration extends IssueIntegration<IssueIntegrationId.Jira> {
 
 		const results: SearchedIssue[] = [];
 		for (const resource of myResources) {
-			const userLogin = (await this.getProviderAccountForResource(session, resource))?.username;
-			const resourceIssues = await api.getIssuesForResourceForCurrentUser(this.id, resource.id, {
-				accessToken: session.accessToken,
-			});
-			const formattedIssues = resourceIssues
-				?.map(issue => toSearchedIssue(issue, this, undefined, userLogin))
-				.filter((result): result is SearchedIssue => result != null);
-			if (formattedIssues != null) {
-				results.push(...formattedIssues);
+			try {
+				const userLogin = (await this.getProviderAccountForResource(session, resource))?.username;
+				const resourceIssues = await api.getIssuesForResourceForCurrentUser(this.id, resource.id, {
+					accessToken: session.accessToken,
+				});
+				const formattedIssues = resourceIssues
+					?.map(issue => toSearchedIssue(issue, this, undefined, userLogin))
+					.filter((result): result is SearchedIssue => result != null);
+				if (formattedIssues != null) {
+					results.push(...formattedIssues);
+				}
+			} catch (ex) {
+				// TODO: We need a better way to message the failure to the user here.
+				// This is a stopgap to prevent one bag org from throwing and preventing any issues from being returned.
+				Logger.error(ex, 'searchProviderMyIssues');
 			}
 		}
 
@@ -273,7 +283,7 @@ export class JiraIntegration extends IssueIntegration<IssueIntegrationId.Jira> {
 			});
 		}
 
-		this._organizations ||= new Map<string, JiraOrganizationDescriptor[] | undefined>();
+		this._organizations ??= new Map<string, JiraOrganizationDescriptor[] | undefined>();
 		this._organizations.set(this._session.accessToken, organizations);
 
 		if (storedProjects == null && organizations?.length) {
@@ -285,7 +295,7 @@ export class JiraIntegration extends IssueIntegration<IssueIntegrationId.Jira> {
 			});
 		}
 
-		this._projects ||= new Map<string, JiraProjectDescriptor[] | undefined>();
+		this._projects ??= new Map<string, JiraProjectDescriptor[] | undefined>();
 		for (const project of projects ?? []) {
 			const projectKey = `${this._session.accessToken}:${project.resourceId}`;
 			const projects = this._projects.get(projectKey);
@@ -295,13 +305,6 @@ export class JiraIntegration extends IssueIntegration<IssueIntegrationId.Jira> {
 				projects.push(project);
 			}
 		}
-	}
-
-	protected override async getProviderCurrentAccount(
-		_session: AuthenticationSession,
-		_options?: { avatarSize?: number },
-	): Promise<Account | undefined> {
-		return Promise.resolve(undefined);
 	}
 
 	protected override providerOnDisconnect(): void {

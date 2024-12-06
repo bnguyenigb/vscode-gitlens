@@ -1,59 +1,67 @@
 /*global document window*/
-import type { CssVariables, GraphRef, GraphRow } from '@gitkraken/gitkraken-components';
+import type { CssVariables, GraphRef, GraphRefOptData, GraphRow } from '@gitkraken/gitkraken-components';
 import React from 'react';
 import { render, unmountComponentAtNode } from 'react-dom';
+import type { GraphBranchesVisibility } from '../../../../config';
+import type { SearchQuery } from '../../../../constants.search';
 import type { GitGraphRowType } from '../../../../git/models/graph';
-import type { SearchQuery } from '../../../../git/search';
 import type {
+	DidSearchParams,
 	GraphAvatars,
 	GraphColumnsConfig,
 	GraphExcludedRef,
 	GraphExcludeTypes,
 	GraphMissingRefsMetadata,
 	GraphRefMetadataItem,
+	GraphSearchMode,
 	InternalNotificationType,
 	State,
 	UpdateGraphConfigurationParams,
 	UpdateStateCallback,
 } from '../../../../plus/webviews/graph/protocol';
 import {
+	ChooseRefRequest,
 	ChooseRepositoryCommand,
 	DidChangeAvatarsNotification,
+	DidChangeBranchStateNotification,
 	DidChangeColumnsNotification,
-	DidChangeFocusNotification,
 	DidChangeGraphConfigurationNotification,
 	DidChangeNotification,
 	DidChangeRefsMetadataNotification,
 	DidChangeRefsVisibilityNotification,
+	DidChangeRepoConnectionNotification,
 	DidChangeRowsNotification,
 	DidChangeRowsStatsNotification,
 	DidChangeScrollMarkersNotification,
 	DidChangeSelectionNotification,
 	DidChangeSubscriptionNotification,
-	DidChangeWindowFocusNotification,
 	DidChangeWorkingTreeNotification,
 	DidFetchNotification,
 	DidSearchNotification,
+	DidStartFeaturePreviewNotification,
 	DoubleClickedCommandType,
 	EnsureRowRequest,
 	GetMissingAvatarsCommand,
 	GetMissingRefsMetadataCommand,
 	GetMoreRowsCommand,
+	GetRowHoverRequest,
+	OpenPullRequestDetailsCommand,
 	SearchOpenInViewCommand,
 	SearchRequest,
 	UpdateColumnsCommand,
-	UpdateDimMergeCommitsCommand,
-	UpdateExcludeTypeCommand,
+	UpdateExcludeTypesCommand,
 	UpdateGraphConfigurationCommand,
-	UpdateIncludeOnlyRefsCommand,
+	UpdateGraphSearchModeCommand,
+	UpdateIncludedRefsCommand,
 	UpdateRefsVisibilityCommand,
 	UpdateSelectionCommand,
 } from '../../../../plus/webviews/graph/protocol';
 import { Color, getCssVariable, mix, opacity } from '../../../../system/color';
-import { debug } from '../../../../system/decorators/log';
+import { debug, log } from '../../../../system/decorators/log';
 import { debounce } from '../../../../system/function';
 import { getLogScope, setLogScopeExit } from '../../../../system/logger.scope';
 import type { IpcMessage, IpcNotification } from '../../../protocol';
+import { DidChangeHostWindowFocusNotification } from '../../../protocol';
 import { App } from '../../shared/appBase';
 import type { ThemeChangeEvent } from '../../shared/theme';
 import { GraphWrapper } from './GraphWrapper';
@@ -79,11 +87,10 @@ export class GraphApp extends App<State> {
 		super('GraphApp');
 	}
 
+	@log()
 	protected override onBind() {
 		const disposables = super.onBind?.() ?? [];
 		// disposables.push(DOM.on(window, 'keyup', e => this.onKeyUp(e)));
-
-		this.log(`onBind()`);
 
 		this.ensureTheming(this.state);
 
@@ -94,31 +101,34 @@ export class GraphApp extends App<State> {
 					nonce={this.state.nonce}
 					state={this.state}
 					subscriber={(updateState: UpdateStateCallback) => this.registerUpdateStateCallback(updateState)}
-					onColumnsChange={debounce<GraphApp['onColumnsChanged']>(
+					onChangeColumns={debounce<GraphApp['onColumnsChanged']>(
 						settings => this.onColumnsChanged(settings),
 						250,
 					)}
-					onDimMergeCommits={dim => this.onDimMergeCommits(dim)}
-					onRefsVisibilityChange={(refs: GraphExcludedRef[], visible: boolean) =>
+					onChangeExcludeTypes={this.onExcludeTypesChanged.bind(this)}
+					onChangeGraphConfiguration={this.onGraphConfigurationChanged.bind(this)}
+					onChangeGraphSearchMode={this.onGraphSearchModeChanged.bind(this)}
+					onChangeRefIncludes={this.onRefIncludesChanged.bind(this)}
+					onChangeRefsVisibility={(refs: GraphExcludedRef[], visible: boolean) =>
 						this.onRefsVisibilityChanged(refs, visible)
 					}
-					onChooseRepository={debounce<GraphApp['onChooseRepository']>(() => this.onChooseRepository(), 250)}
-					onDoubleClickRef={(ref, metadata) => this.onDoubleClickRef(ref, metadata)}
-					onDoubleClickRow={(row, preserveFocus) => this.onDoubleClickRow(row, preserveFocus)}
-					onMissingAvatars={(...params) => this.onGetMissingAvatars(...params)}
-					onMissingRefsMetadata={(...params) => this.onGetMissingRefsMetadata(...params)}
-					onMoreRows={(...params) => this.onGetMoreRows(...params)}
-					onSearch={debounce<GraphApp['onSearch']>((search, options) => this.onSearch(search, options), 250)}
-					onSearchPromise={(...params) => this.onSearchPromise(...params)}
-					onSearchOpenInView={(...params) => this.onSearchOpenInView(...params)}
-					onSelectionChange={debounce<GraphApp['onSelectionChanged']>(
+					onChangeSelection={debounce<GraphApp['onSelectionChanged']>(
 						rows => this.onSelectionChanged(rows),
 						250,
 					)}
+					onChooseRepository={debounce<GraphApp['onChooseRepository']>(() => this.onChooseRepository(), 250)}
+					onDoubleClickRef={(ref, metadata) => this.onDoubleClickRef(ref, metadata)}
+					onDoubleClickRow={(row, preserveFocus) => this.onDoubleClickRow(row, preserveFocus)}
 					onEnsureRowPromise={this.onEnsureRowPromise.bind(this)}
-					onExcludeType={this.onExcludeType.bind(this)}
-					onIncludeOnlyRef={this.onIncludeOnlyRef.bind(this)}
-					onUpdateGraphConfiguration={this.onUpdateGraphConfiguration.bind(this)}
+					onHoverRowPromise={(row: GraphRow) => this.onHoverRowPromise(row)}
+					onJumpToRefPromise={(shift: boolean) => this.onJumpToRefPromise(shift)}
+					onMissingAvatars={(...params) => this.onGetMissingAvatars(...params)}
+					onMissingRefsMetadata={(...params) => this.onGetMissingRefsMetadata(...params)}
+					onMoreRows={(...params) => this.onGetMoreRows(...params)}
+					onOpenPullRequest={(...params) => this.onOpenPullRequest(...params)}
+					onSearch={debounce<GraphApp['onSearch']>((search, options) => this.onSearch(search, options), 250)}
+					onSearchPromise={(...params) => this.onSearchPromise(...params)}
+					onSearchOpenInView={(...params) => this.onSearchOpenInView(...params)}
 				/>,
 				$root,
 			);
@@ -156,13 +166,19 @@ export class GraphApp extends App<State> {
 				this.state.avatars = msg.params.avatars;
 				this.setState(this.state, DidChangeAvatarsNotification);
 				break;
-			case DidChangeFocusNotification.is(msg):
-				window.dispatchEvent(new CustomEvent(msg.params.focused ? 'webview-focus' : 'webview-blur'));
+			case DidStartFeaturePreviewNotification.is(msg):
+				this.state.featurePreview = msg.params.featurePreview;
+				this.state.allowed = msg.params.allowed;
+				this.setState(this.state, DidStartFeaturePreviewNotification);
+				break;
+			case DidChangeBranchStateNotification.is(msg):
+				this.state.branchState = msg.params.branchState;
+				this.setState(this.state, DidChangeBranchStateNotification);
 				break;
 
-			case DidChangeWindowFocusNotification.is(msg):
+			case DidChangeHostWindowFocusNotification.is(msg):
 				this.state.windowFocused = msg.params.focused;
-				this.setState(this.state, DidChangeWindowFocusNotification);
+				this.setState(this.state, DidChangeHostWindowFocusNotification);
 				break;
 
 			case DidChangeColumnsNotification.is(msg):
@@ -176,6 +192,7 @@ export class GraphApp extends App<State> {
 				break;
 
 			case DidChangeRefsVisibilityNotification.is(msg):
+				this.state.branchesVisibility = msg.params.branchesVisibility;
 				this.state.excludeRefs = msg.params.excludeRefs;
 				this.state.excludeTypes = msg.params.excludeTypes;
 				this.state.includeOnlyRefs = msg.params.includeOnlyRefs;
@@ -276,11 +293,7 @@ export class GraphApp extends App<State> {
 				break;
 
 			case DidSearchNotification.is(msg):
-				this.state.searchResults = msg.params.results;
-				if (msg.params.selectedRows != null) {
-					this.state.selectedRows = msg.params.selectedRows;
-				}
-				this.setState(this.state, DidSearchNotification);
+				this.updateSearchResultState(msg.params);
 				break;
 
 			case DidChangeSelectionNotification.is(msg):
@@ -302,6 +315,11 @@ export class GraphApp extends App<State> {
 			case DidChangeWorkingTreeNotification.is(msg):
 				this.state.workingTreeStats = msg.params.stats;
 				this.setState(this.state, DidChangeWorkingTreeNotification);
+				break;
+
+			case DidChangeRepoConnectionNotification.is(msg):
+				this.state.repositories = msg.params.repositories;
+				this.setState(this.state, DidChangeRepoConnectionNotification);
 				break;
 
 			default:
@@ -492,6 +510,10 @@ export class GraphApp extends App<State> {
 					'--color-graph-scroll-marker-selection',
 					computedStyle,
 				),
+				'--scroll-marker-pull-requests-color': getCssVariable(
+					'--color-graph-scroll-marker-pull-requests',
+					computedStyle,
+				),
 
 				'--stats-added-color': getCssVariable('--color-graph-stats-added', computedStyle),
 				'--stats-deleted-color': getCssVariable('--color-graph-stats-deleted', computedStyle),
@@ -534,12 +556,6 @@ export class GraphApp extends App<State> {
 		this.sendCommand(ChooseRepositoryCommand, undefined);
 	}
 
-	private onDimMergeCommits(dim: boolean) {
-		this.sendCommand(UpdateDimMergeCommitsCommand, {
-			dim: dim,
-		});
-	}
-
 	private onDoubleClickRef(ref: GraphRef, metadata?: GraphRefMetadataItem) {
 		this.sendCommand(DoubleClickedCommandType, {
 			type: 'ref',
@@ -556,6 +572,30 @@ export class GraphApp extends App<State> {
 		});
 	}
 
+	private async onHoverRowPromise(row: GraphRow) {
+		try {
+			const request = await this.sendRequest(GetRowHoverRequest, {
+				type: row.type as GitGraphRowType,
+				id: row.sha,
+			});
+			this._telemetry.sendEvent({ name: 'graph/row/hovered', data: {} });
+			return request;
+		} catch (ex) {
+			return { id: row.sha, markdown: { status: 'rejected' as const, reason: ex } };
+		}
+	}
+
+	private async onJumpToRefPromise(alt: boolean): Promise<{ name: string; sha: string } | undefined> {
+		try {
+			// Assuming we have a command to get the ref details
+			const rsp = await this.sendRequest(ChooseRefRequest, { alt: alt });
+			this._telemetry.sendEvent({ name: 'graph/action/jumpTo', data: { alt: alt } });
+			return rsp;
+		} catch {
+			return undefined;
+		}
+	}
+
 	private onGetMissingAvatars(emails: GraphAvatars) {
 		this.sendCommand(GetMissingAvatarsCommand, { emails: emails });
 	}
@@ -568,20 +608,31 @@ export class GraphApp extends App<State> {
 		this.sendCommand(GetMoreRowsCommand, { id: sha });
 	}
 
-	private onSearch(search: SearchQuery | undefined, options?: { limit?: number }) {
+	onOpenPullRequest(pr: NonNullable<NonNullable<State['branchState']>['pr']>): void {
+		this.sendCommand(OpenPullRequestDetailsCommand, { id: pr.id });
+	}
+
+	private async onSearch(search: SearchQuery | undefined, options?: { limit?: number }) {
 		if (search == null) {
 			this.state.searchResults = undefined;
 		}
-		this.sendCommand(SearchRequest, { search: search, limit: options?.limit });
+		try {
+			const rsp = await this.sendRequest(SearchRequest, { search: search, limit: options?.limit });
+			this.updateSearchResultState(rsp);
+		} catch {
+			this.state.searchResults = undefined;
+		}
 	}
 
 	private async onSearchPromise(search: SearchQuery, options?: { limit?: number; more?: boolean }) {
 		try {
-			return await this.sendRequest(SearchRequest, {
+			const rsp = await this.sendRequest(SearchRequest, {
 				search: search,
 				limit: options?.limit,
 				more: options?.more,
 			});
+			this.updateSearchResultState(rsp);
+			return rsp;
 		} catch {
 			return undefined;
 		}
@@ -599,23 +650,25 @@ export class GraphApp extends App<State> {
 		}
 	}
 
-	private onExcludeType(key: keyof GraphExcludeTypes, value: boolean) {
-		this.sendCommand(UpdateExcludeTypeCommand, { key: key, value: value });
+	private onExcludeTypesChanged(key: keyof GraphExcludeTypes, value: boolean) {
+		this.sendCommand(UpdateExcludeTypesCommand, { key: key, value: value });
 	}
 
-	private onIncludeOnlyRef(all?: boolean) {
-		this.sendCommand(
-			UpdateIncludeOnlyRefsCommand,
-			all ? {} : { refs: [{ id: 'HEAD', type: 'head', name: 'HEAD' }] },
-		);
+	private onRefIncludesChanged(branchesVisibility: GraphBranchesVisibility, refs?: GraphRefOptData[]) {
+		this.sendCommand(UpdateIncludedRefsCommand, { branchesVisibility: branchesVisibility, refs: refs });
 	}
 
-	private onUpdateGraphConfiguration(changes: UpdateGraphConfigurationParams['changes']) {
+	private onGraphConfigurationChanged(changes: UpdateGraphConfigurationParams['changes']) {
 		this.sendCommand(UpdateGraphConfigurationCommand, { changes: changes });
+	}
+
+	private onGraphSearchModeChanged(searchMode: GraphSearchMode) {
+		this.sendCommand(UpdateGraphSearchModeCommand, { searchMode: searchMode });
 	}
 
 	private onSelectionChanged(rows: GraphRow[]) {
 		const selection = rows.filter(r => r != null).map(r => ({ id: r.sha, type: r.type as GitGraphRowType }));
+		this._telemetry.sendEvent({ name: 'graph/row/selected', data: { rows: selection.length } });
 		this.sendCommand(UpdateSelectionCommand, {
 			selection: selection,
 		});
@@ -627,6 +680,14 @@ export class GraphApp extends App<State> {
 		return () => {
 			this.updateStateCallback = undefined;
 		};
+	}
+
+	private updateSearchResultState(params: DidSearchParams) {
+		this.state.searchResults = params.results;
+		if (params.selectedRows != null) {
+			this.state.selectedRows = params.selectedRows;
+		}
+		this.setState(this.state, DidSearchNotification);
 	}
 }
 

@@ -1,6 +1,6 @@
 import type { TextEditor, Uri } from 'vscode';
-import type { StoredNamedRef } from '../constants';
-import { Commands } from '../constants';
+import { Commands } from '../constants.commands';
+import type { StoredNamedRef } from '../constants.storage';
 import type { Container } from '../container';
 import { GitUri } from '../git/gitUri';
 import { getBranchNameAndRemote } from '../git/models/branch';
@@ -10,9 +10,9 @@ import { showGenericErrorMessage } from '../messages';
 import { ReferencesQuickPickIncludes, showReferencePicker } from '../quickpicks/referencePicker';
 import { showRemotePicker } from '../quickpicks/remotePicker';
 import { getBestRepositoryOrShowPicker } from '../quickpicks/repositoryPicker';
-import { command } from '../system/command';
 import { Logger } from '../system/logger';
 import { normalizePath } from '../system/path';
+import { command } from '../system/vscode/command';
 import { DeepLinkType, deepLinkTypeToString, refTypeToDeepLinkType } from '../uris/deepLinks/deepLink';
 import type { CommandContext } from './base';
 import {
@@ -53,6 +53,12 @@ export class CopyDeepLinkCommand extends ActiveEditorCommand {
 		if (args == null) {
 			if (isCommandContextViewNodeHasCommit(context)) {
 				args = { refOrRepoPath: context.node.commit };
+			} else if (isCommandContextViewNodeHasComparison(context)) {
+				args = {
+					refOrRepoPath: context.node.uri.fsPath,
+					compareRef: context.node.compareRef,
+					compareWithRef: context.node.compareWithRef,
+				};
 			} else if (isCommandContextViewNodeHasBranch(context)) {
 				if (context.command === Commands.CopyDeepLinkToRepo) {
 					args = {
@@ -66,12 +72,6 @@ export class CopyDeepLinkCommand extends ActiveEditorCommand {
 				args = { refOrRepoPath: context.node.tag };
 			} else if (isCommandContextViewNodeHasRemote(context)) {
 				args = { refOrRepoPath: context.node.remote.repoPath, remote: context.node.remote.name };
-			} else if (isCommandContextViewNodeHasComparison(context)) {
-				args = {
-					refOrRepoPath: context.node.uri.fsPath,
-					compareRef: context.node.compareRef,
-					compareWithRef: context.node.compareWithRef,
-				};
 			} else if (isCommandContextViewNodeHasWorkspace(context)) {
 				args = { workspaceId: context.node.workspace.id };
 			}

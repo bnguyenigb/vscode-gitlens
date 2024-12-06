@@ -1,13 +1,13 @@
 import type { Uri } from 'vscode';
 import { window } from 'vscode';
-import { Commands } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { showGenericErrorMessage } from '../messages';
 import { getRepositoryOrShowPicker } from '../quickpicks/repositoryPicker';
 import { filterMap } from '../system/array';
-import { command } from '../system/command';
 import { Logger } from '../system/logger';
-import { findOrOpenEditors } from '../system/utils';
+import { command } from '../system/vscode/command';
+import { findOrOpenEditors } from '../system/vscode/utils';
 import { Command } from './base';
 
 export interface OpenChangedFilesCommandArgs {
@@ -28,7 +28,7 @@ export class OpenChangedFilesCommand extends Command {
 				const repository = await getRepositoryOrShowPicker('Open All Changed Files');
 				if (repository == null) return;
 
-				const status = await this.container.git.getStatusForRepo(repository.uri);
+				const status = await this.container.git.getStatus(repository.uri);
 				if (status == null) {
 					void window.showWarningMessage('Unable to open changed files');
 

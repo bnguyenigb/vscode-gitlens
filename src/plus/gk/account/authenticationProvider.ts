@@ -1,10 +1,11 @@
+import { uuid } from '@env/crypto';
 import type {
 	AuthenticationProvider,
 	AuthenticationProviderAuthenticationSessionsChangeEvent,
 	AuthenticationSession,
 } from 'vscode';
-import { authentication, Disposable, EventEmitter, window } from 'vscode';
-import { uuid } from '@env/crypto';
+import { Disposable, EventEmitter, window } from 'vscode';
+import type { TrackingContext } from '../../../constants.telemetry';
 import type { Container, Environment } from '../../../container';
 import { CancellationError } from '../../../errors';
 import { debug } from '../../../system/decorators/log';
@@ -26,7 +27,12 @@ interface StoredSession {
 
 export const authenticationProviderId = 'gitlens+';
 export const authenticationProviderScopes = ['gitlens'];
-const authenticationLabel = 'GitKraken: GitLens';
+
+export interface AuthenticationProviderOptions {
+	signUp?: boolean;
+	signIn?: { code: string; state?: string };
+	context?: TrackingContext;
+}
 
 export class AccountAuthenticationProvider implements AuthenticationProvider, Disposable {
 	private _onDidChangeSessions = new EventEmitter<AuthenticationProviderAuthenticationSessionsChangeEvent>();
@@ -37,6 +43,7 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 	private readonly _disposable: Disposable;
 	private readonly _authConnection: AuthenticationConnection;
 	private _sessionsPromise: Promise<AuthenticationSession[]>;
+	private _optionsByScope: Map<string, AuthenticationProviderOptions> | undefined;
 
 	constructor(
 		private readonly container: Container,
@@ -49,9 +56,6 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 
 		this._disposable = Disposable.from(
 			this._authConnection,
-			authentication.registerAuthenticationProvider(authenticationProviderId, authenticationLabel, this, {
-				supportsMultipleAccounts: false,
-			}),
 			this.container.storage.onDidChangeSecrets(() => this.checkForUpdates()),
 		);
 	}
@@ -68,22 +72,32 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 		return this._authConnection.abort();
 	}
 
+	public setOptionsForScopes(scopes: string[], options: AuthenticationProviderOptions) {
+		this._optionsByScope ??= new Map<string, AuthenticationProviderOptions>();
+		this._optionsByScope.set(getScopesKey(scopes), options);
+	}
+
+	public clearOptionsForScopes(scopes: string[]) {
+		this._optionsByScope?.delete(getScopesKey(scopes));
+	}
+
 	@debug()
 	public async createSession(scopes: string[]): Promise<AuthenticationSession> {
 		const scope = getLogScope();
 
-		const signUp = scopes.includes('signUp');
-		// 'signUp' is just a flag, not a valid scope, so remove it before continuing
-		if (signUp) {
-			scopes = scopes.filter(s => s !== 'signUp');
+		const options = this._optionsByScope?.get(getScopesKey(scopes));
+		if (options != null) {
+			this._optionsByScope?.delete(getScopesKey(scopes));
 		}
-
 		// Ensure that the scopes are sorted consistently (since we use them for matching and order doesn't matter)
 		scopes = scopes.sort();
 		const scopesKey = getScopesKey(scopes);
 
 		try {
-			const token = await this._authConnection.login(scopes, scopesKey, signUp);
+			const token =
+				options?.signIn != null
+					? await this._authConnection.getTokenFromCodeAndState(options.signIn.code, options.signIn.state)
+					: await this._authConnection.login(scopes, scopesKey, options?.signUp, options?.context);
 			const session = await this.createSessionForToken(token, scopes);
 
 			const sessions = await this._sessionsPromise;
@@ -100,7 +114,7 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 			return session;
 		} catch (ex) {
 			// If login was cancelled, do not notify user.
-			if (ex === 'Cancelled') throw ex;
+			if (ex === 'Cancelled' || ex.message === 'Cancelled') throw ex;
 
 			Logger.error(ex, scope);
 			void window.showErrorMessage(
@@ -216,6 +230,20 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 		}
 	}
 
+	public async getOrCreateSession(
+		scopes: string[],
+		createIfNeeded: boolean,
+	): Promise<AuthenticationSession | undefined> {
+		const session = (await this.getSessions(scopes))[0];
+		if (session != null) {
+			return session;
+		}
+		if (!createIfNeeded) {
+			return undefined;
+		}
+		return this.createSession(scopes);
+	}
+
 	private async createSessionForToken(token: string, scopes: string[]): Promise<AuthenticationSession> {
 		const userInfo = await this._authConnection.getAccountInfo(token);
 		return {
@@ -296,6 +324,10 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 		} catch (ex) {
 			Logger.error(ex, `Unable to store ${sessions.length} sessions`);
 		}
+	}
+
+	async getExchangeToken(redirectPath?: string): Promise<string> {
+		return this._authConnection.getExchangeToken(redirectPath);
 	}
 }
 

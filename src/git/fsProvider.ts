@@ -1,12 +1,13 @@
+import { isLinux } from '@env/platform';
 import type { Event, FileChangeEvent, FileStat, FileSystemProvider, Uri } from 'vscode';
 import { Disposable, EventEmitter, FileSystemError, FileType, workspace } from 'vscode';
-import { isLinux } from '@env/platform';
 import { Schemes } from '../constants';
 import type { Container } from '../container';
 import { debug } from '../system/decorators/log';
 import { map } from '../system/iterable';
-import { normalizePath, relative } from '../system/path';
+import { normalizePath } from '../system/path';
 import { TernarySearchTree } from '../system/searchTree';
+import { relative } from '../system/vscode/path';
 import { GitUri, isGitUri } from './gitUri';
 import { deletedOrMissing } from './models/constants';
 import type { GitTreeEntry } from './models/tree';

@@ -1,6 +1,6 @@
 /*global*/
 import './timeline.scss';
-import { provideVSCodeDesignSystem, vsCodeDropdown, vsCodeOption } from '@vscode/webview-ui-toolkit';
+import { isSubscriptionPaid } from '../../../../plus/gk/account/subscription';
 import type { Period, State } from '../../../../plus/webviews/timeline/protocol';
 import {
 	DidChangeNotification,
@@ -9,8 +9,8 @@ import {
 } from '../../../../plus/webviews/timeline/protocol';
 import type { IpcMessage } from '../../../protocol';
 import { App } from '../../shared/appBase';
-import type { FeatureGate } from '../../shared/components/feature-gate';
-import type { FeatureGateBadge } from '../../shared/components/feature-gate-badge';
+import type { GlFeatureBadge } from '../../shared/components/feature-badge';
+import type { GlFeatureGate } from '../../shared/components/feature-gate';
 import { DOM } from '../../shared/dom';
 import type { DataPointClickEvent } from './chart';
 import { TimelineChart } from './chart';
@@ -18,7 +18,7 @@ import '../../shared/components/code-icon';
 import '../../shared/components/progress';
 import '../../shared/components/button';
 import '../../shared/components/feature-gate';
-import '../../shared/components/feature-gate-badge';
+import '../../shared/components/feature-badge';
 
 export class TimelineApp extends App<State> {
 	private _chart: TimelineChart | undefined;
@@ -28,8 +28,6 @@ export class TimelineApp extends App<State> {
 	}
 
 	protected override onInitialize() {
-		provideVSCodeDesignSystem().register(vsCodeDropdown(), vsCodeOption());
-
 		this.updateState();
 	}
 
@@ -81,15 +79,23 @@ export class TimelineApp extends App<State> {
 	}
 
 	private updateState() {
-		const $gate = document.getElementById('subscription-gate')! as FeatureGate;
+		const $gate = document.getElementById('subscription-gate')! as GlFeatureGate;
 		if ($gate != null) {
+			$gate.source = { source: 'timeline', detail: 'gate' };
 			$gate.state = this.state.access.subscription.current.state;
-			$gate.visible = this.state.access.allowed !== true && this.state.uri != null;
+			$gate.visible = this.state.access.allowed !== true; // && this.state.uri != null;
 		}
 
-		const $badge = document.getElementById('subscription-gate-badge')! as FeatureGateBadge;
-		$badge.subscription = this.state.access.subscription.current;
-		$badge.placement = this.placement === 'view' ? 'top start' : 'top end';
+		const showBadge =
+			this.state.access.subscription?.current == null ||
+			!isSubscriptionPaid(this.state.access.subscription?.current);
+
+		const els = document.querySelectorAll<GlFeatureBadge>('gl-feature-badge');
+		for (const el of els) {
+			el.source = { source: 'timeline', detail: 'badge' };
+			el.subscription = this.state.access.subscription.current;
+			el.hidden = !showBadge;
+		}
 
 		if (this._chart == null) {
 			this._chart = new TimelineChart('#chart', this.placement);
@@ -138,7 +144,7 @@ export class TimelineApp extends App<State> {
 		if ($periods != null) {
 			const period = this.state?.period;
 
-			const $periodOptions = $periods.getElementsByTagName('vscode-option');
+			const $periodOptions = $periods.getElementsByTagName('option');
 			for (const $option of $periodOptions) {
 				if (period === $option.getAttribute('value')) {
 					$option.setAttribute('selected', '');

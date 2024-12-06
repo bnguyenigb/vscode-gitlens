@@ -11,7 +11,14 @@ import './gl-patch-create';
 interface ExplainState {
 	cancelled?: boolean;
 	error?: { message: string };
-	summary?: string;
+	result?: { summary: string; body: string };
+}
+
+interface GenerateState {
+	cancelled?: boolean;
+	error?: { message: string };
+	title?: string;
+	description?: string;
 }
 
 export interface ApplyPatchDetail {
@@ -37,17 +44,16 @@ export interface ShowPatchInGraphDetail {
 	// [key: string]: unknown;
 }
 
-export type GlPatchDetailsAppEvents = {
-	[K in Extract<keyof WindowEventMap, `gl-patch-details-${string}`>]: WindowEventMap[K];
-};
-
 @customElement('gl-patch-details-app')
-export class GlPatchDetailsApp extends GlElement<GlPatchDetailsAppEvents> {
+export class GlPatchDetailsApp extends GlElement {
 	@property({ type: Object })
 	state!: State;
 
 	@property({ type: Object })
 	explain?: ExplainState;
+
+	@property({ type: Object })
+	generate?: GenerateState;
 
 	@property({ attribute: false, type: Object })
 	app?: PatchDetailsApp;
@@ -115,7 +121,7 @@ export class GlPatchDetailsApp extends GlElement<GlPatchDetailsAppEvents> {
 					${when(
 						this.mode === 'view',
 						() => html`<gl-draft-details .state=${this.state} .explain=${this.explain}></gl-draft-details>`,
-						() => html`<gl-patch-create .state=${this.state}></gl-patch-create>`,
+						() => html`<gl-patch-create .state=${this.state} .generate=${this.generate}></gl-patch-create>`,
 					)}
 				</main>
 			</div>
@@ -144,7 +150,7 @@ declare global {
 		'gl-patch-details-app': GlPatchDetailsApp;
 	}
 
-	// interface WindowEventMap {
+	// interface GlobalEventHandlersEventMap {
 	// 	'gl-patch-details-graph-show-patch': CustomEvent<ShowPatchInGraphDetail>;
 	// 	'gl-patch-details-share-local-patch': CustomEvent<undefined>;
 	// 	'gl-patch-details-copy-cloud-link': CustomEvent<undefined>;

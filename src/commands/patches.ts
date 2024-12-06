@@ -1,21 +1,27 @@
+import { EntityIdentifierUtils } from '@gitkraken/provider-apis';
 import type { TextEditor } from 'vscode';
 import { env, Uri, window, workspace } from 'vscode';
 import type { ScmResource } from '../@types/vscode.git.resources';
 import { ScmResourceGroupType } from '../@types/vscode.git.resources.enums';
-import { Commands } from '../constants';
+import { Commands } from '../constants.commands';
+import type { IntegrationId } from '../constants.integrations';
 import type { Container } from '../container';
+import { CancellationError } from '../errors';
 import { ApplyPatchCommitError, ApplyPatchCommitErrorReason } from '../git/errors';
 import { uncommitted, uncommittedStaged } from '../git/models/constants';
 import type { GitDiff } from '../git/models/diff';
 import { isSha, shortenRevision } from '../git/models/reference';
 import type { Repository } from '../git/models/repository';
+import { splitGitCommitMessage } from '../git/utils/commit-utils';
 import type { Draft, LocalDraft } from '../gk/models/drafts';
 import { showPatchesView } from '../plus/drafts/actions';
+import type { ProviderAuth } from '../plus/drafts/draftsService';
+import { getProviderIdFromEntityIdentifier } from '../plus/integrations/providers/utils';
 import type { Change, CreateDraft } from '../plus/webviews/patchDetails/protocol';
 import { getRepositoryOrShowPicker } from '../quickpicks/repositoryPicker';
-import { command } from '../system/command';
 import { map } from '../system/iterable';
 import { Logger } from '../system/logger';
+import { command } from '../system/vscode/command';
 import type { CommandContext } from './base';
 import {
 	ActiveEditorCommand,
@@ -23,6 +29,7 @@ import {
 	isCommandContextViewNodeHasCommit,
 	isCommandContextViewNodeHasComparison,
 	isCommandContextViewNodeHasFileCommit,
+	isCommandContextViewNodeHasFileRefs,
 } from './base';
 
 export interface CreatePatchCommandArgs {
@@ -30,11 +37,14 @@ export interface CreatePatchCommandArgs {
 	from?: string;
 	repoPath?: string;
 	uris?: Uri[];
+
+	title?: string;
+	description?: string;
 }
 
 abstract class CreatePatchCommandBase extends Command {
 	constructor(
-		private readonly container: Container,
+		protected readonly container: Container,
 		command: Commands | Commands[],
 	) {
 		super(command);
@@ -61,14 +71,16 @@ abstract class CreatePatchCommandBase extends Command {
 					}
 				}
 
+				const to =
+					resourcesByGroup.size === 1 && resourcesByGroup.has(ScmResourceGroupType.Index)
+						? uncommittedStaged
+						: uncommitted;
 				args = {
 					repoPath: repo?.path,
-					to:
-						resourcesByGroup.size == 1 && resourcesByGroup.has(ScmResourceGroupType.Index)
-							? uncommittedStaged
-							: uncommitted,
+					to: to,
 					from: 'HEAD',
 					uris: [...map(uris, u => Uri.parse(u))],
+					title: to === uncommittedStaged ? 'Staged Changes' : 'Uncommitted Changes',
 				};
 			} else if (context.type === 'scm-groups') {
 				const group = context.scmResourceGroups[0];
@@ -76,17 +88,28 @@ abstract class CreatePatchCommandBase extends Command {
 
 				const repo = await this.container.git.getOrOpenRepository(group.resourceStates[0].resourceUri);
 
+				const to = group.id === 'index' ? uncommittedStaged : uncommitted;
 				args = {
 					repoPath: repo?.path,
-					to: group.id === 'index' ? uncommittedStaged : uncommitted,
+					to: to,
 					from: 'HEAD',
+					title: to === uncommittedStaged ? 'Staged Changes' : 'Uncommitted Changes',
 				};
 			} else if (context.type === 'viewItem') {
 				if (isCommandContextViewNodeHasCommit(context)) {
+					const { commit } = context.node;
+					if (commit.message == null) {
+						await commit.ensureFullDetails();
+					}
+
+					const { title, description } = splitGitCommitMessage(commit.message);
+
 					args = {
 						repoPath: context.node.commit.repoPath,
 						to: context.node.commit.ref,
 						from: `${context.node.commit.ref}^`,
+						title: title,
+						description: description,
 					};
 					if (isCommandContextViewNodeHasFileCommit(context)) {
 						args.uris = [context.node.uri];
@@ -96,6 +119,16 @@ abstract class CreatePatchCommandBase extends Command {
 						repoPath: context.node.uri.fsPath,
 						to: context.node.compareRef.ref,
 						from: context.node.compareWithRef.ref,
+						title: `Changes between ${shortenRevision(context.node.compareRef.ref)} and ${shortenRevision(
+							context.node.compareWithRef.ref,
+						)}`,
+					};
+				} else if (isCommandContextViewNodeHasFileRefs(context)) {
+					args = {
+						repoPath: context.node.repoPath,
+						to: context.node.ref2,
+						from: context.node.ref1,
+						uris: [context.node.uri],
 					};
 				}
 			}
@@ -116,7 +149,9 @@ abstract class CreatePatchCommandBase extends Command {
 			repo.uri,
 			args?.to ?? uncommitted,
 			args?.from ?? 'HEAD',
-			args?.uris?.length ? { uris: args.uris } : undefined,
+			args?.uris?.length
+				? { uris: args.uris }
+				: { includeUntracked: args?.to != null || args?.to === uncommitted },
 		);
 	}
 
@@ -133,6 +168,7 @@ export class CreatePatchCommand extends CreatePatchCommandBase {
 		const diff = await this.getDiff('Create Patch', args);
 		if (diff == null) return;
 
+		debugger;
 		const d = await workspace.openTextDocument({ content: diff.contents, language: 'diff' });
 		await window.showTextDocument(d);
 
@@ -166,7 +202,7 @@ export class CopyPatchToClipboardCommand extends CreatePatchCommandBase {
 @command()
 export class ApplyPatchFromClipboardCommand extends Command {
 	constructor(private readonly container: Container) {
-		super(Commands.ApplyPatchFromClipboard);
+		super([Commands.ApplyPatchFromClipboard, Commands.PastePatchFromClipboard]);
 	}
 
 	async execute() {
@@ -195,6 +231,8 @@ export class ApplyPatchFromClipboardCommand extends Command {
 			await this.container.git.applyUnreachableCommitForPatch(repo.uri, commit.sha, { stash: false });
 			void window.showInformationMessage(`Patch applied successfully`);
 		} catch (ex) {
+			if (ex instanceof CancellationError) return;
+
 			if (ex instanceof ApplyPatchCommitError) {
 				if (ex.reason === ApplyPatchCommitErrorReason.AppliedWithConflicts) {
 					void window.showWarningMessage('Patch applied with conflicts');
@@ -202,37 +240,16 @@ export class ApplyPatchFromClipboardCommand extends Command {
 					void window.showErrorMessage(ex.message);
 				}
 			} else {
-				void window.showErrorMessage(`Unable apply patch: ${ex.message}`);
+				void window.showErrorMessage(`Unable to apply patch: ${ex.message}`);
 			}
 		}
 	}
 }
 
 @command()
-export class CreateCloudPatchCommand extends Command {
-	constructor(private readonly container: Container) {
-		super([Commands.CreateCloudPatch, Commands.ShareAsCloudPatch]);
-	}
-
-	protected override preExecute(context: CommandContext, args?: CreatePatchCommandArgs) {
-		if (args == null) {
-			if (context.type === 'viewItem') {
-				if (isCommandContextViewNodeHasCommit(context)) {
-					args = {
-						repoPath: context.node.commit.repoPath,
-						to: context.node.commit.ref,
-					};
-				} else if (isCommandContextViewNodeHasComparison(context)) {
-					args = {
-						repoPath: context.node.uri.fsPath,
-						to: context.node.compareRef.ref,
-						from: context.node.compareWithRef.ref,
-					};
-				}
-			}
-		}
-
-		return this.execute(args);
+export class CreateCloudPatchCommand extends CreatePatchCommandBase {
+	constructor(container: Container) {
+		super(container, [Commands.CreateCloudPatch, Commands.ShareAsCloudPatch]);
 	}
 
 	async execute(args?: CreatePatchCommandArgs) {
@@ -293,9 +310,11 @@ export class OpenPatchCommand extends ActiveEditorCommand {
 }
 
 export interface OpenCloudPatchCommandArgs {
+	type: 'patch' | 'code_suggestion';
 	id: string;
 	patchId?: string;
 	draft?: Draft;
+	prEntityId?: string;
 }
 
 @command()
@@ -305,17 +324,52 @@ export class OpenCloudPatchCommand extends Command {
 	}
 
 	async execute(args?: OpenCloudPatchCommandArgs) {
+		const type = args?.type === 'code_suggestion' ? 'Code Suggestion' : 'Cloud Patch';
 		if (args?.id == null && args?.draft == null) {
-			void window.showErrorMessage('Cannot open Cloud Patch; no patch or patch id provided');
+			void window.showErrorMessage(`Cannot open ${type}; no patch or patch id provided`);
 			return;
 		}
 
+		let providerAuth: ProviderAuth | undefined;
+		if (args?.prEntityId != null && args?.type === 'code_suggestion') {
+			let providerId: IntegrationId | undefined;
+			let providerDomain: string | undefined;
+			try {
+				const identifier = EntityIdentifierUtils.decode(args.prEntityId);
+				providerId = getProviderIdFromEntityIdentifier(identifier);
+				providerDomain = identifier.domain ?? undefined;
+			} catch {
+				void window.showErrorMessage(`Cannot open ${type}; invalid provider details.`);
+				return;
+			}
+
+			if (providerId == null) {
+				void window.showErrorMessage(`Cannot open ${type}; unsupported provider.`);
+				return;
+			}
+
+			const integration = await this.container.integrations.get(providerId, providerDomain);
+			if (integration == null) {
+				void window.showErrorMessage(`Cannot open ${type}; provider not found.`);
+				return;
+			}
+
+			const session = await integration.getSession('cloud-patches');
+			if (session == null) {
+				void window.showErrorMessage(`Cannot open ${type}; provider not connected.`);
+				return;
+			}
+
+			providerAuth = { provider: integration.id, token: session.accessToken };
+		}
+
 		try {
-			const draft = args?.draft ?? (await this.container.drafts.getDraft(args?.id));
+			const draft =
+				args?.draft ?? (await this.container.drafts.getDraft(args?.id, { providerAuth: providerAuth }));
 			void showPatchesView({ mode: 'view', draft: draft });
 		} catch (ex) {
 			Logger.error(ex, 'OpenCloudPatchCommand');
-			void window.showErrorMessage(`Unable to open Cloud Patch '${args.id}'`);
+			void window.showErrorMessage(`Unable to open ${type} '${args.id}'`);
 		}
 	}
 }
@@ -340,19 +394,10 @@ async function createDraft(
 		revision: { to: to, from: args.from ?? `${to}^` },
 	};
 
-	const create: CreateDraft = { changes: [change] };
+	const create: CreateDraft = { changes: [change], title: args.title, description: args.description };
 
 	const commit = await container.git.getCommit(repository.uri, to);
 	if (commit == null) return undefined;
-
-	const message = commit.message!.trim();
-	const index = message.indexOf('\n');
-	if (index < 0) {
-		create.title = message;
-	} else {
-		create.title = message.substring(0, index);
-		create.description = message.substring(index + 1).trim();
-	}
 
 	if (args.from == null) {
 		if (commit.files == null) return;
@@ -366,8 +411,6 @@ async function createDraft(
 		if (result?.files == null) return;
 
 		change.files = result.files;
-
-		create.title = `Comparing ${shortenRevision(args.to)} with ${shortenRevision(args.from)}`;
 
 		if (!isSha(args.to)) {
 			const commit = await container.git.getCommit(repository.uri, args.to);

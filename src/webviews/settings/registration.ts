@@ -1,6 +1,6 @@
 import { Disposable, ViewColumn } from 'vscode';
-import { Commands } from '../../constants';
-import { registerCommand } from '../../system/command';
+import { Commands } from '../../constants.commands';
+import { registerCommand } from '../../system/vscode/command';
 import type { WebviewPanelsProxy, WebviewsController } from '../webviewsController';
 import type { State } from './protocol';
 
@@ -16,6 +16,7 @@ export function registerSettingsWebviewPanel(controller: WebviewsController) {
 			title: 'GitLens Settings',
 			contextKeyPrefix: `gitlens:webview:settings`,
 			trackingFeature: 'settingsWebview',
+			type: 'settings',
 			plusFeature: false,
 			column: ViewColumn.Active,
 			webviewHostOptions: {

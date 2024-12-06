@@ -1,9 +1,16 @@
+import { Uri, window } from 'vscode';
+import { Schemes } from '../../constants';
 import { Container } from '../../container';
+import type { RepositoryIdentityDescriptor } from '../../gk/models/repositoryIdentities';
+import type { EnrichablePullRequest } from '../../plus/integrations/providers/models';
 import { formatDate, fromNow } from '../../system/date';
 import { memoize } from '../../system/decorators/memoize';
+import type { LeftRightCommitCountResult } from '../gitProvider';
 import type { IssueOrPullRequest, IssueRepository, IssueOrPullRequestState as PullRequestState } from './issue';
-import { shortenRevision } from './reference';
+import type { PullRequestURLIdentity } from './pullRequest.utils';
+import { createRevisionRange, shortenRevision } from './reference';
 import type { ProviderReference } from './remoteProvider';
+import type { Repository } from './repository';
 
 export type { PullRequestState };
 
@@ -56,9 +63,10 @@ export interface PullRequestRefs {
 }
 
 export interface PullRequestMember {
+	id: string;
 	name: string;
-	avatarUrl: string;
-	url: string;
+	avatarUrl?: string;
+	url?: string;
 }
 
 export interface PullRequestReviewer {
@@ -103,6 +111,7 @@ export function serializePullRequest(value: PullRequest): PullRequestShape {
 		closedDate: value.closedDate,
 		closed: value.closed,
 		author: {
+			id: value.author.id,
 			name: value.author.name,
 			avatarUrl: value.author.avatarUrl,
 			url: value.author.url,
@@ -149,9 +158,10 @@ export class PullRequest implements PullRequestShape {
 	constructor(
 		public readonly provider: ProviderReference,
 		public readonly author: {
+			readonly id: string;
 			readonly name: string;
-			readonly avatarUrl: string;
-			readonly url: string;
+			readonly avatarUrl?: string;
+			readonly url?: string;
 		},
 		public readonly id: string,
 		public readonly nodeId: string | undefined,
@@ -239,24 +249,189 @@ export interface PullRequestComparisonRefs {
 	head: { ref: string; label: string };
 }
 
-export async function getComparisonRefsForPullRequest(
-	container: Container,
-	repoPath: string,
-	prRefs: PullRequestRefs,
-): Promise<PullRequestComparisonRefs> {
+export function getComparisonRefsForPullRequest(repoPath: string, prRefs: PullRequestRefs): PullRequestComparisonRefs {
 	const refs: PullRequestComparisonRefs = {
 		repoPath: repoPath,
 		base: { ref: prRefs.base.sha, label: `${prRefs.base.branch} (${shortenRevision(prRefs.base.sha)})` },
 		head: { ref: prRefs.head.sha, label: prRefs.head.branch },
 	};
+	return refs;
+}
 
-	// Find the merge base to show a more accurate comparison for the PR
-	const mergeBase =
-		(await container.git.getMergeBase(refs.repoPath, refs.base.ref, refs.head.ref, { forkPoint: true })) ??
-		(await container.git.getMergeBase(refs.repoPath, refs.base.ref, refs.head.ref));
-	if (mergeBase != null) {
-		refs.base = { ref: mergeBase, label: `${prRefs.base.branch} (${shortenRevision(mergeBase)})` };
+export type PullRequestRepositoryIdentityDescriptor = RequireSomeWithProps<
+	RequireSome<RepositoryIdentityDescriptor<string>, 'provider'>,
+	'provider',
+	'id' | 'domain' | 'repoDomain' | 'repoName'
+> &
+	RequireSomeWithProps<RequireSome<RepositoryIdentityDescriptor<string>, 'remote'>, 'remote', 'domain'>;
+
+export function getRepositoryIdentityForPullRequest(
+	pr: PullRequest,
+	headRepo: boolean = true,
+): PullRequestRepositoryIdentityDescriptor {
+	if (headRepo) {
+		return {
+			remote: {
+				url: pr.refs?.head?.url,
+				domain: pr.provider.domain,
+			},
+			name: `${pr.refs?.head?.owner ?? pr.repository.owner}/${pr.refs?.head?.repo ?? pr.repository.repo}`,
+			provider: {
+				id: pr.provider.id,
+				domain: pr.provider.domain,
+				repoDomain: pr.refs?.head?.owner ?? pr.repository.owner,
+				repoName: pr.refs?.head?.repo ?? pr.repository.repo,
+			},
+		};
 	}
 
-	return refs;
+	return {
+		remote: {
+			url: pr.refs?.base?.url ?? pr.url,
+			domain: pr.provider.domain,
+		},
+		name: `${pr.refs?.base?.owner ?? pr.repository.owner}/${pr.refs?.base?.repo ?? pr.repository.repo}`,
+		provider: {
+			id: pr.provider.id,
+			domain: pr.provider.domain,
+			repoDomain: pr.refs?.base?.owner ?? pr.repository.owner,
+			repoName: pr.refs?.base?.repo ?? pr.repository.repo,
+			repoOwnerDomain: pr.refs?.base?.owner ?? pr.repository.owner,
+		},
+	};
+}
+
+export function getVirtualUriForPullRequest(pr: PullRequest): Uri | undefined {
+	if (pr.provider.id !== 'github') return undefined;
+
+	const uri = Uri.parse(pr.refs?.base?.url ?? pr.url);
+	return uri.with({ scheme: Schemes.Virtual, authority: 'github', path: uri.path });
+}
+
+export async function getOrOpenPullRequestRepository(
+	container: Container,
+	pr: PullRequest,
+	options?: { promptIfNeeded?: boolean; skipVirtual?: boolean },
+): Promise<Repository | undefined> {
+	const identity = getRepositoryIdentityForPullRequest(pr);
+	let repo = await container.repositoryIdentity.getRepository(identity, {
+		openIfNeeded: true,
+		keepOpen: false,
+		prompt: false,
+	});
+
+	if (repo == null && !options?.skipVirtual) {
+		const virtualUri = getVirtualUriForPullRequest(pr);
+		if (virtualUri != null) {
+			repo = await container.git.getOrOpenRepository(virtualUri, { closeOnOpen: true, detectNested: false });
+		}
+	}
+
+	if (repo == null) {
+		const baseIdentity = getRepositoryIdentityForPullRequest(pr, false);
+		repo = await container.repositoryIdentity.getRepository(baseIdentity, {
+			openIfNeeded: true,
+			keepOpen: false,
+			prompt: false,
+		});
+	}
+
+	if (repo == null && options?.promptIfNeeded) {
+		repo = await container.repositoryIdentity.getRepository(identity, {
+			openIfNeeded: true,
+			keepOpen: false,
+			prompt: true,
+		});
+	}
+
+	return repo;
+}
+
+export async function ensurePullRequestRefs(
+	container: Container,
+	pr: PullRequest,
+	repo: Repository,
+	options?: { promptMessage?: string },
+	refs?: PullRequestComparisonRefs,
+): Promise<LeftRightCommitCountResult | undefined> {
+	if (pr.refs == null) return undefined;
+
+	refs ??= getComparisonRefsForPullRequest(repo.path, pr.refs);
+	const range = createRevisionRange(refs.base.ref, refs.head.ref, '...');
+	let counts = await container.git.getLeftRightCommitCount(repo.path, range);
+	if (counts == null) {
+		if (await ensurePullRequestRemote(pr, repo, options)) {
+			counts = await container.git.getLeftRightCommitCount(repo.path, range);
+		}
+	}
+
+	return counts;
+}
+
+export async function ensurePullRequestRemote(
+	pr: PullRequest,
+	repo: Repository,
+	options?: { promptMessage?: string },
+): Promise<boolean> {
+	const identity = getRepositoryIdentityForPullRequest(pr);
+	if (identity.remote.url == null) return false;
+
+	const prRemoteUrl = identity.remote.url.replace(/\.git$/, '');
+
+	let found = false;
+	for (const remote of await repo.git.getRemotes()) {
+		if (remote.matches(prRemoteUrl)) {
+			found = true;
+			break;
+		}
+	}
+
+	if (found) return true;
+
+	const confirm = { title: 'Add Remote' };
+	const cancel = { title: 'Cancel', isCloseAffordance: true };
+	const result = await window.showInformationMessage(
+		`${
+			options?.promptMessage ?? `Unable to find a remote for PR #${pr.id}.`
+		}\nWould you like to add a remote for '${identity.provider.repoDomain}?`,
+		{ modal: true },
+		confirm,
+		cancel,
+	);
+
+	if (result === confirm) {
+		await repo.addRemote(identity.provider.repoDomain, identity.remote.url, { fetch: true });
+		return true;
+	}
+
+	return false;
+}
+
+export async function getOpenedPullRequestRepo(
+	container: Container,
+	pr: PullRequest,
+	repoPath?: string,
+): Promise<Repository | undefined> {
+	if (repoPath) return container.git.getRepository(repoPath);
+
+	const repo = await getOrOpenPullRequestRepository(container, pr, { promptIfNeeded: true });
+	return repo;
+}
+
+export function doesPullRequestSatisfyRepositoryURLIdentity(
+	pr: EnrichablePullRequest | undefined,
+	{ ownerAndRepo, prNumber }: PullRequestURLIdentity,
+): boolean {
+	if (pr == null) {
+		return false;
+	}
+	const satisfiesPrNumber = prNumber != null && pr.number === parseInt(prNumber, 10);
+	if (!satisfiesPrNumber) {
+		return false;
+	}
+	const satisfiesOwnerAndRepo = ownerAndRepo != null && pr.repoIdentity.name === ownerAndRepo;
+	if (!satisfiesOwnerAndRepo) {
+		return false;
+	}
+	return true;
 }

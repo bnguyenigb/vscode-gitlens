@@ -1,7 +1,7 @@
 import type { CancellationToken, ConfigurationChangeEvent, Disposable, Event } from 'vscode';
 import { EventEmitter, ProgressLocation, window } from 'vscode';
 import type { RepositoriesViewConfig, ViewBranchesLayout, ViewFilesLayout } from '../config';
-import { Commands } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { getRemoteNameFromBranchName } from '../git/models/branch';
 import type { GitCommit } from '../git/models/commit';
@@ -16,10 +16,10 @@ import type {
 import { getReferenceLabel } from '../git/models/reference';
 import type { GitRemote } from '../git/models/remote';
 import type { GitWorktree } from '../git/models/worktree';
-import { executeCommand } from '../system/command';
-import { configuration } from '../system/configuration';
-import { setContext } from '../system/context';
 import { gate } from '../system/decorators/gate';
+import { executeCommand } from '../system/vscode/command';
+import { configuration } from '../system/vscode/configuration';
+import { setContext } from '../system/vscode/context';
 import { BranchesNode } from './nodes/branchesNode';
 import { BranchNode } from './nodes/branchNode';
 import { BranchOrTagFolderNode } from './nodes/branchOrTagFolderNode';
@@ -42,8 +42,8 @@ import { registerViewCommand } from './viewCommands';
 export class RepositoriesView extends ViewBase<'repositories', RepositoriesNode, RepositoriesViewConfig> {
 	protected readonly configKey = 'repositories';
 
-	constructor(container: Container) {
-		super(container, 'repositories', 'Repositories', 'repositoriesView');
+	constructor(container: Container, grouped?: boolean) {
+		super(container, 'repositories', 'Repositories', 'repositoriesView', grouped);
 	}
 
 	private _onDidChangeAutoRefresh = new EventEmitter<void>();
@@ -56,8 +56,6 @@ export class RepositoriesView extends ViewBase<'repositories', RepositoriesNode,
 	}
 
 	protected registerCommands(): Disposable[] {
-		void this.container.viewCommands;
-
 		return [
 			registerViewCommand(
 				this.getQualifiedCommand('copy'),
@@ -258,6 +256,7 @@ export class RepositoriesView extends ViewBase<'repositories', RepositoriesNode,
 
 		return true;
 	}
+
 	protected override onConfigurationChanged(e: ConfigurationChangeEvent) {
 		if (configuration.changed(e, `views.${this.configKey}.autoRefresh` as const)) {
 			void this.setAutoRefresh(configuration.get('views.repositories.autoRefresh'));
@@ -515,7 +514,7 @@ export class RepositoriesView extends ViewBase<'repositories', RepositoriesNode,
 				})} in the Repositories view...`,
 				cancellable: true,
 			},
-			async (progress, token) => {
+			async (_progress, token) => {
 				const node = await this.findBranch(branch, token);
 				if (node == null) return undefined;
 
@@ -574,7 +573,7 @@ export class RepositoriesView extends ViewBase<'repositories', RepositoriesNode,
 				})} in the Repositories view...`,
 				cancellable: true,
 			},
-			async (progress, token) => {
+			async (_progress, token) => {
 				const node = await this.findCommit(commit, token);
 				if (node == null) return undefined;
 
@@ -600,7 +599,7 @@ export class RepositoriesView extends ViewBase<'repositories', RepositoriesNode,
 				title: `Revealing contributor '${contributor.name} in the Repositories view...`,
 				cancellable: true,
 			},
-			async (progress, token) => {
+			async (_progress, token) => {
 				const node = await this.findContributor(contributor, token);
 				if (node == null) return undefined;
 
@@ -626,7 +625,7 @@ export class RepositoriesView extends ViewBase<'repositories', RepositoriesNode,
 				title: `Revealing remote '${remote.name}' in the side bar...`,
 				cancellable: true,
 			},
-			async (progress, token) => {
+			async (_progress, token) => {
 				const node = await this.findRemote(remote, token);
 				if (node == null) return undefined;
 
@@ -676,7 +675,7 @@ export class RepositoriesView extends ViewBase<'repositories', RepositoriesNode,
 				})} in the Repositories view...`,
 				cancellable: true,
 			},
-			async (progress, token) => {
+			async (_progress, token) => {
 				const node = await this.findStash(stash, token);
 				if (node !== undefined) {
 					await this.reveal(node, options);
@@ -735,7 +734,7 @@ export class RepositoriesView extends ViewBase<'repositories', RepositoriesNode,
 				})} in the Repositories view...`,
 				cancellable: true,
 			},
-			async (progress, token) => {
+			async (_progress, token) => {
 				const node = await this.findTag(tag, token);
 				if (node == null) return undefined;
 
@@ -791,7 +790,7 @@ export class RepositoriesView extends ViewBase<'repositories', RepositoriesNode,
 				title: `Revealing worktree '${worktree.name}' in the side bar...`,
 				cancellable: true,
 			},
-			async (progress, token) => {
+			async (_progress, token) => {
 				const node = await this.findWorktree(worktree, token);
 				if (node == null) return undefined;
 

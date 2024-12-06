@@ -1,3 +1,5 @@
+import { fetch, getProxyAgent, wrapForForcedInsecureSSL } from '@env/fetch';
+import { isWeb } from '@env/platform';
 import { graphql, GraphqlResponseError } from '@octokit/graphql';
 import { request } from '@octokit/request';
 import { RequestError } from '@octokit/request-error';
@@ -5,24 +7,23 @@ import type { Endpoints, OctokitResponse, RequestParameters } from '@octokit/typ
 import type { HttpsProxyAgent } from 'https-proxy-agent';
 import type { CancellationToken, Disposable, Event } from 'vscode';
 import { EventEmitter, Uri, window } from 'vscode';
-import { fetch, getProxyAgent, wrapForForcedInsecureSSL } from '@env/fetch';
-import { isWeb } from '@env/platform';
 import type { Container } from '../../../../container';
 import {
 	AuthenticationError,
 	AuthenticationErrorReason,
 	CancellationError,
-	ProviderRequestClientError,
-	ProviderRequestNotFoundError,
-	ProviderRequestRateLimitError,
+	RequestClientError,
+	RequestNotFoundError,
+	RequestRateLimitError,
 } from '../../../../errors';
 import type { PagedResult, RepositoryVisibility } from '../../../../git/gitProvider';
-import type { Account } from '../../../../git/models/author';
+import type { Account, UnidentifiedAuthor } from '../../../../git/models/author';
 import type { DefaultBranch } from '../../../../git/models/defaultBranch';
 import type { IssueOrPullRequest, SearchedIssue } from '../../../../git/models/issue';
 import type { PullRequest, SearchedPullRequest } from '../../../../git/models/pullRequest';
 import { PullRequestMergeMethod } from '../../../../git/models/pullRequest';
-import { isSha } from '../../../../git/models/reference';
+import type { GitRevisionRange } from '../../../../git/models/reference';
+import { createRevisionRange, getRevisionRangeParts, isRevisionRange, isSha } from '../../../../git/models/reference';
 import type { Provider } from '../../../../git/models/remoteProvider';
 import type { RepositoryMetadata } from '../../../../git/models/repositoryMetadata';
 import type { GitUser } from '../../../../git/models/user';
@@ -31,7 +32,6 @@ import {
 	showIntegrationRequestFailed500WarningMessage,
 	showIntegrationRequestTimedOutWarningMessage,
 } from '../../../../messages';
-import { configuration } from '../../../../system/configuration';
 import { debug } from '../../../../system/decorators/log';
 import { uniqueBy } from '../../../../system/iterable';
 import { Logger } from '../../../../system/logger';
@@ -41,6 +41,7 @@ import { maybeStopWatch } from '../../../../system/stopwatch';
 import { base64 } from '../../../../system/string';
 import type { Version } from '../../../../system/version';
 import { fromString, satisfies } from '../../../../system/version';
+import { configuration } from '../../../../system/vscode/configuration';
 import type {
 	GitHubBlame,
 	GitHubBlameRange,
@@ -48,52 +49,45 @@ import type {
 	GitHubCommit,
 	GitHubCommitRef,
 	GitHubContributor,
-	GitHubDetailedPullRequest,
-	GitHubIssueDetailed,
+	GitHubIssue,
 	GitHubIssueOrPullRequest,
 	GitHubPagedResult,
 	GitHubPageInfo,
 	GitHubPullRequest,
+	GitHubPullRequestLite,
 	GitHubPullRequestState,
 	GitHubTag,
 } from './models';
 import {
-	fromGitHubIssueDetailed,
+	fromGitHubIssue,
+	fromGitHubIssueOrPullRequestState,
 	fromGitHubPullRequest,
-	fromGitHubPullRequestDetailed,
-	fromGitHubPullRequestState,
+	fromGitHubPullRequestLite,
 } from './models';
 
 const emptyPagedResult: PagedResult<any> = Object.freeze({ values: [] });
 const emptyBlameResult: GitHubBlame = Object.freeze({ ranges: [] });
 
-const prNodeProperties = `
-assignees(first: 10) {
-	nodes {
-		login
-		avatarUrl
-		url
-	}
-}
+const gqlIssueOrPullRequestFragment = `
+closed
+closedAt
+createdAt
+id
+number
+state
+title
+updatedAt
+url
+`;
+const gqlPullRequestLiteFragment = `
+${gqlIssueOrPullRequestFragment}
 author {
 	login
-	avatarUrl
+	avatarUrl(size: $avatarSize)
 	url
 }
 baseRefName
 baseRefOid
-baseRepository {
-	name
-	owner {
-		login
-	}
-	url
-}
-checksUrl
-createdAt
-isDraft
-isCrossRepository
-isReadByViewer
 headRefName
 headRefOid
 headRepository {
@@ -103,33 +97,47 @@ headRepository {
 	}
 	url
 }
-permalink
-id
-number
-title
-state
-additions
-deletions
-updatedAt
-closedAt
-mergeable
-viewerCanUpdate
+isCrossRepository
 mergedAt
-mergedBy {
-	login
-}
-reactions(content: THUMBS_UP) {
-	totalCount
-}
+permalink
 repository {
 	isFork
 	name
 	owner {
 		login
 	}
+	url
 	viewerPermission
 }
+`;
+const gqlPullRequestFragment = `
+${gqlPullRequestLiteFragment}
+additions
+assignees(first: 10) {
+	nodes {
+		login
+		avatarUrl(size: $avatarSize)
+		url
+	}
+}
+checksUrl
+deletions
+isDraft
+mergeable
+mergedBy {
+	login
+}
 reviewDecision
+latestReviews(first: 10) {
+	nodes {
+		author {
+			login
+			avatarUrl(size: $avatarSize)
+			url
+		}
+		state
+	}
+}
 reviewRequests(first: 10) {
 	nodes {
 		asCodeOwner
@@ -137,76 +145,52 @@ reviewRequests(first: 10) {
 		requestedReviewer {
 			... on User {
 				login
-				avatarUrl
+				avatarUrl(size: $avatarSize)
 				url
 			}
 		}
 	}
 }
-latestReviews (first: 10) {
-	nodes {
-		author {
-			login
-			avatarUrl
-			url
-		}
-		state
-	}
+statusCheckRollup {
+	state
 }
 totalCommentsCount
-commits(last: 1) {
-	nodes {
-		commit {
-			oid
-			statusCheckRollup {
-				state
-			}
-		}
-	}
-}
+viewerCanUpdate
 `;
 
-const issueNodeProperties = `
-... on Issue {
-	assignees(first: 100) {
-		nodes {
-			login
-			url
-			avatarUrl
-		}
-	}
-	author {
+const gqIssueFragment = `
+${gqlIssueOrPullRequestFragment}
+assignees(first: 100) {
+	nodes {
 		login
-		avatarUrl
 		url
+		avatarUrl(size: $avatarSize)
 	}
-	comments {
-	  totalCount
-	}
-	id
-	number
-	title
+}
+author {
+	login
+	avatarUrl
 	url
-	createdAt
-	closedAt
-	closed
-	updatedAt
-	labels(first: 20) {
-		nodes {
-			color
-			name
-		}
-	}
-	reactions(content: THUMBS_UP) {
-	  totalCount
-	}
-	repository {
+}
+comments {
+	totalCount
+}
+labels(first: 20) {
+	nodes {
+		color
 		name
-		owner {
-			login
-		}
-		viewerPermission
 	}
+}
+reactions(content: THUMBS_UP) {
+	totalCount
+}
+repository {
+	name
+	owner {
+		login
+	}
+	viewerPermission
+	url
 }
 `;
 
@@ -279,10 +263,11 @@ export class GitHubApi implements Disposable {
 }`;
 
 			const rsp = await this.graphql<QueryResult>(provider, token, query, { ...options }, scope);
-			if (rsp?.viewer == null) return undefined;
+			if (rsp?.viewer?.login == null) return undefined;
 
 			return {
 				provider: provider,
+				id: rsp.viewer.login,
 				name: rsp.viewer.name ?? undefined,
 				email: rsp.viewer.email ?? undefined,
 				// If we are GitHub Enterprise, we may need to convert the avatar URL since it might require authentication
@@ -301,7 +286,7 @@ export class GitHubApi implements Disposable {
 				username: rsp.viewer.login ?? undefined,
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, provider, scope);
 		}
@@ -318,7 +303,7 @@ export class GitHubApi implements Disposable {
 			baseUrl?: string;
 			avatarSize?: number;
 		},
-	): Promise<Account | undefined> {
+	): Promise<Account | UnidentifiedAuthor | undefined> {
 		const scope = getLogScope();
 
 		interface QueryResult {
@@ -383,6 +368,15 @@ export class GitHubApi implements Disposable {
 
 			return {
 				provider: provider,
+				...(author?.user?.login != null
+					? {
+							id: author.user.login,
+							username: author.user.login,
+					  }
+					: {
+							id: undefined,
+							username: undefined,
+					  }),
 				name: author.name ?? undefined,
 				email: author.email ?? undefined,
 				// If we are GitHub Enterprise, we may need to convert the avatar URL since it might require authentication
@@ -398,10 +392,9 @@ export class GitHubApi implements Disposable {
 									options.avatarSize,
 						    )
 						  : undefined,
-				username: author.user?.login ?? undefined,
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, provider, scope);
 		}
@@ -469,10 +462,11 @@ export class GitHubApi implements Disposable {
 			);
 
 			const author = rsp?.search?.nodes?.[0];
-			if (author == null) return undefined;
+			if (author?.login == null) return undefined;
 
 			return {
 				provider: provider,
+				id: author.login,
 				name: author.name ?? undefined,
 				email: author.email ?? undefined,
 				// If we are GitHub Enterprise, we may need to convert the avatar URL since it might require authentication
@@ -491,7 +485,7 @@ export class GitHubApi implements Disposable {
 				username: author.login ?? undefined,
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, provider, scope);
 		}
@@ -550,7 +544,7 @@ export class GitHubApi implements Disposable {
 				name: defaultBranch,
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, provider, scope);
 		}
@@ -583,24 +577,10 @@ export class GitHubApi implements Disposable {
 		issueOrPullRequest(number: $number) {
 			__typename
 			... on Issue {
-				createdAt
-				closed
-				closedAt
-				id
-				title
-				updatedAt
-				url
-				state
+				${gqlIssueOrPullRequestFragment}
 			}
 			... on PullRequest {
-				createdAt
-				closed
-				closedAt
-				id
-				title
-				updatedAt
-				url
-				state
+				${gqlIssueOrPullRequestFragment}
 			}
 		}
 	}
@@ -624,8 +604,8 @@ export class GitHubApi implements Disposable {
 
 			return {
 				provider: provider,
-				type: issue.type,
-				id: String(number),
+				type: issue.__typename === 'PullRequest' ? 'pullrequest' : 'issue',
+				id: String(issue.number),
 				nodeId: issue.id,
 				createdDate: new Date(issue.createdAt),
 				updatedDate: new Date(issue.updatedAt),
@@ -633,10 +613,70 @@ export class GitHubApi implements Disposable {
 				closed: issue.closed,
 				closedDate: issue.closedAt == null ? undefined : new Date(issue.closedAt),
 				url: issue.url,
-				state: fromGitHubPullRequestState(issue.state),
+				state: fromGitHubIssueOrPullRequestState(issue.state),
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
+
+			throw this.handleException(ex, provider, scope);
+		}
+	}
+
+	@debug<GitHubApi['getPullRequest']>({ args: { 0: p => p.name, 1: '<token>' } })
+	async getPullRequest(
+		provider: Provider,
+		token: string,
+		owner: string,
+		repo: string,
+		number: number,
+		options?: {
+			baseUrl?: string;
+			avatarSize?: number;
+		},
+	): Promise<PullRequest | undefined> {
+		const scope = getLogScope();
+
+		interface QueryResult {
+			repository:
+				| {
+						pullRequest: GitHubPullRequestLite | null | undefined;
+				  }
+				| null
+				| undefined;
+		}
+
+		try {
+			const query = `query getPullRequest(
+	$owner: String!
+	$repo: String!
+	$number: Int!
+	$avatarSize: Int
+) {
+	repository(name: $repo, owner: $owner) {
+		pullRequest(number: $number) {
+			${gqlPullRequestFragment}
+		}
+	}
+}`;
+
+			const rsp = await this.graphql<QueryResult>(
+				provider,
+				token,
+				query,
+				{
+					...options,
+					owner: owner,
+					repo: repo,
+					number: number,
+				},
+				scope,
+			);
+
+			if (rsp?.repository?.pullRequest == null) return undefined;
+
+			return fromGitHubPullRequestLite(rsp.repository.pullRequest, provider);
+		} catch (ex) {
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, provider, scope);
 		}
@@ -663,7 +703,7 @@ export class GitHubApi implements Disposable {
 						ref:
 							| {
 									associatedPullRequests?: {
-										nodes?: GitHubPullRequest[];
+										nodes?: GitHubPullRequestLite[];
 									};
 							  }
 							| null
@@ -686,46 +726,7 @@ export class GitHubApi implements Disposable {
 		ref(qualifiedName: $branch) {
 			associatedPullRequests(first: $limit, orderBy: {field: UPDATED_AT, direction: DESC}, states: $include) {
 				nodes {
-					author {
-						login
-						avatarUrl(size: $avatarSize)
-						url
-					}
-					createdAt
-					permalink
-					number
-					title
-					state
-					updatedAt
-					closedAt
-					mergedAt
-					baseRefName
-					baseRefOid
-					baseRepository {
-						name
-						owner {
-							login
-						}
-						url
-					}
-					headRefName
-					headRefOid
-					headRepository {
-						name
-						owner {
-							login
-						}
-						url
-					}
-					repository {
-						isFork
-						name
-						owner {
-							login
-						}
-						viewerPermission
-					}
-					isCrossRepository
+					${gqlPullRequestLiteFragment}
 				}
 			}
 		}
@@ -762,9 +763,9 @@ export class GitHubApi implements Disposable {
 				);
 			}
 
-			return fromGitHubPullRequest(prs[0], provider);
+			return fromGitHubPullRequestLite(prs[0], provider);
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, provider, scope);
 		}
@@ -790,7 +791,7 @@ export class GitHubApi implements Disposable {
 				| {
 						object?: {
 							associatedPullRequests?: {
-								nodes?: GitHubPullRequest[];
+								nodes?: GitHubPullRequestLite[];
 							};
 						};
 				  }
@@ -810,46 +811,7 @@ export class GitHubApi implements Disposable {
 			... on Commit {
 				associatedPullRequests(first: 2, orderBy: {field: UPDATED_AT, direction: DESC}) {
 					nodes {
-						author {
-							login
-							avatarUrl(size: $avatarSize)
-							url
-						}
-						createdAt
-						permalink
-						number
-						title
-						state
-						updatedAt
-						closedAt
-						mergedAt
-						baseRefName
-						baseRefOid
-						baseRepository {
-							name
-							owner {
-								login
-							}
-							url
-						}
-						headRefName
-						headRefOid
-						headRepository {
-							name
-							owner {
-								login
-							}
-							url
-						}
-						repository {
-							name
-							isFork
-							owner {
-								login
-							}
-							viewerPermission
-						}
-						isCrossRepository
+						${gqlPullRequestLiteFragment}
 					}
 				}
 			}
@@ -886,9 +848,9 @@ export class GitHubApi implements Disposable {
 				);
 			}
 
-			return fromGitHubPullRequest(prs[0], provider);
+			return fromGitHubPullRequestLite(prs[0], provider);
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, provider, scope);
 		}
@@ -977,7 +939,7 @@ export class GitHubApi implements Disposable {
 						: undefined,
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, provider, scope);
 		}
@@ -1060,7 +1022,7 @@ export class GitHubApi implements Disposable {
 
 			return { ranges: ranges, viewer: rsp.viewer?.name };
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return emptyBlameResult;
+			if (ex instanceof RequestNotFoundError) return emptyBlameResult;
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -1144,7 +1106,7 @@ export class GitHubApi implements Disposable {
 				values: refs.nodes,
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return emptyPagedResult;
+			if (ex instanceof RequestNotFoundError) return emptyPagedResult;
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -1197,7 +1159,7 @@ export class GitHubApi implements Disposable {
 				files: result.files,
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -1305,7 +1267,7 @@ export class GitHubApi implements Disposable {
 
 			return branches;
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return [];
+			if (ex instanceof RequestNotFoundError) return [];
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -1359,7 +1321,7 @@ export class GitHubApi implements Disposable {
 			const count = rsp?.repository?.ref?.target.history.totalCount;
 			return count;
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -1439,7 +1401,7 @@ export class GitHubApi implements Disposable {
 
 			return branches;
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return [];
+			if (ex instanceof RequestNotFoundError) return [];
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -1466,6 +1428,10 @@ export class GitHubApi implements Disposable {
 
 		if (options?.limit === 1 && options?.path == null) {
 			return this.getCommitsCoreSingle(token, owner, repo, ref);
+		}
+
+		if (isRevisionRange(ref)) {
+			return this.getCommitsCoreRange(token, owner, repo, ref);
 		}
 
 		interface QueryResult {
@@ -1584,7 +1550,46 @@ export class GitHubApi implements Disposable {
 				viewer: rsp?.viewer.name,
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return emptyPagedResult;
+			if (ex instanceof RequestNotFoundError) return emptyPagedResult;
+
+			throw this.handleException(ex, undefined, scope);
+		}
+	}
+
+	private async getCommitsCoreRange(
+		token: string,
+		owner: string,
+		repo: string,
+		range: GitRevisionRange,
+	): Promise<PagedResult<GitHubCommit> & { viewer?: string }> {
+		const scope = getLogScope();
+
+		try {
+			const result = await this.getComparison(token, owner, repo, range);
+			if (result == null) return emptyPagedResult;
+
+			return {
+				values: result.commits
+					?.map<GitHubCommit>(r => ({
+						oid: r.sha,
+						parents: { nodes: r.parents.map(p => ({ oid: p.sha })) },
+						message: r.commit.message,
+						author: {
+							avatarUrl: r.author?.avatar_url ?? undefined,
+							date: r.commit.author?.date ?? r.commit.author?.date ?? new Date().toString(),
+							email: r.author?.email ?? r.commit.author?.email ?? undefined,
+							name: r.author?.name ?? r.commit.author?.name ?? '',
+						},
+						committer: {
+							date: r.commit.committer?.date ?? new Date().toString(),
+							email: r.committer?.email ?? r.commit.committer?.email ?? undefined,
+							name: r.committer?.name ?? r.commit.committer?.name ?? '',
+						},
+					}))
+					.reverse(),
+			};
+		} catch (ex) {
+			if (ex instanceof RequestNotFoundError) return emptyPagedResult;
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -1651,7 +1656,7 @@ export class GitHubApi implements Disposable {
 			const commit = rsp.repository?.object;
 			return commit != null ? { values: [commit], viewer: rsp.viewer.name } : emptyPagedResult;
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return emptyPagedResult;
+			if (ex instanceof RequestNotFoundError) return emptyPagedResult;
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -1746,7 +1751,7 @@ export class GitHubApi implements Disposable {
 				values: history.nodes,
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -1822,7 +1827,7 @@ export class GitHubApi implements Disposable {
 
 			return tags;
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return [];
+			if (ex instanceof RequestNotFoundError) return [];
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -1907,7 +1912,7 @@ export class GitHubApi implements Disposable {
 			const date = rsp?.repository?.object?.committer.date;
 			return date;
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -1937,7 +1942,7 @@ export class GitHubApi implements Disposable {
 
 			return rsp.data;
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return [];
+			if (ex instanceof RequestNotFoundError) return [];
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -1982,7 +1987,7 @@ export class GitHubApi implements Disposable {
 
 			return rsp.repository?.defaultBranchRef?.name ?? undefined;
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -2030,7 +2035,46 @@ export class GitHubApi implements Disposable {
 				id: rsp.viewer?.id,
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
+
+			throw this.handleException(ex, undefined, scope);
+		}
+	}
+
+	@debug<GitHubApi['getComparison']>({ args: { 0: '<token>' } })
+	async getComparison(
+		token: string,
+		owner: string,
+		repo: string,
+		range: GitRevisionRange,
+	): Promise<Endpoints['GET /repos/{owner}/{repo}/compare/{basehead}']['response']['data'] | undefined> {
+		const scope = getLogScope();
+
+		if (!isRevisionRange(range, 'qualified-triple-dot')) {
+			// GitHub doesn't support the `..` range notation, so convert it to `...` since it will work for many of our usages
+			const parts = getRevisionRangeParts(range);
+			range = createRevisionRange(parts?.left || 'HEAD', parts?.right || 'HEAD', '...');
+		}
+
+		try {
+			const rsp = await this.request(
+				undefined,
+				token,
+				'GET /repos/{owner}/{repo}/compare/{basehead}',
+				{
+					owner: owner,
+					repo: repo,
+					basehead: range,
+				},
+				scope,
+			);
+
+			const result = rsp?.data;
+			if (result == null) return undefined;
+
+			return result;
+		} catch (ex) {
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -2077,7 +2121,7 @@ export class GitHubApi implements Disposable {
 
 			return rsp.repository.visibility === 'PUBLIC' ? 'public' : 'private';
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -2169,7 +2213,7 @@ export class GitHubApi implements Disposable {
 				values: refs.nodes,
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return emptyPagedResult;
+			if (ex instanceof RequestNotFoundError) return emptyPagedResult;
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -2261,7 +2305,7 @@ export class GitHubApi implements Disposable {
 			);
 			return rsp?.repository?.object?.history.nodes?.[0]?.oid ?? undefined;
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -2346,7 +2390,7 @@ export class GitHubApi implements Disposable {
 				values: commits,
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -2418,7 +2462,7 @@ export class GitHubApi implements Disposable {
 				})),
 			};
 		} catch (ex) {
-			if (ex instanceof ProviderRequestNotFoundError) return undefined;
+			if (ex instanceof RequestNotFoundError) return undefined;
 
 			throw this.handleException(ex, undefined, scope);
 		}
@@ -2442,7 +2486,7 @@ export class GitHubApi implements Disposable {
 			const rsp = await this.request(provider, token, 'GET /meta', options, scope);
 			const v = (rsp?.data as unknown as { installed_version: string | null | undefined })?.installed_version;
 			version = v ? fromString(v) : null;
-		} catch (ex) {
+		} catch (_ex) {
 			debugger;
 			version = null;
 		}
@@ -2480,7 +2524,7 @@ export class GitHubApi implements Disposable {
 			if (ex instanceof GraphqlResponseError) {
 				switch (ex.errors?.[0]?.type) {
 					case 'NOT_FOUND':
-						throw new ProviderRequestNotFoundError(ex);
+						throw new RequestNotFoundError(ex);
 					case 'FORBIDDEN':
 						throw new AuthenticationError('github', AuthenticationErrorReason.Forbidden, ex);
 					case 'RATE_LIMITED': {
@@ -2494,7 +2538,7 @@ export class GitHubApi implements Disposable {
 							}
 						}
 
-						throw new ProviderRequestRateLimitError(ex, token, resetAt);
+						throw new RequestRateLimitError(ex, token, resetAt);
 					}
 				}
 
@@ -2537,7 +2581,7 @@ export class GitHubApi implements Disposable {
 			return await wrapForForcedInsecureSSL(
 				provider?.getIgnoreSSLErrors() ?? false,
 				() =>
-					this.getDefaults(token, request)<R>(route, options) as unknown as Promise<
+					this.getDefaults(token, request)<R>(route as R, options) as unknown as Promise<
 						R extends keyof Endpoints ? Endpoints[R]['response'] : OctokitResponse<any>
 					>,
 			);
@@ -2625,7 +2669,7 @@ export class GitHubApi implements Disposable {
 			case 404: // Not found
 			case 410: // Gone
 			case 422: // Unprocessable Entity
-				throw new ProviderRequestNotFoundError(ex);
+				throw new RequestNotFoundError(ex);
 			// case 429: //Too Many Requests
 			case 401: // Unauthorized
 				throw new AuthenticationError('github', AuthenticationErrorReason.Unauthorized, ex);
@@ -2641,7 +2685,7 @@ export class GitHubApi implements Disposable {
 						}
 					}
 
-					throw new ProviderRequestRateLimitError(ex, token, resetAt);
+					throw new RequestRateLimitError(ex, token, resetAt);
 				}
 				throw new AuthenticationError('github', AuthenticationErrorReason.Forbidden, ex);
 			case 500: // Internal Server Error
@@ -2666,8 +2710,19 @@ export class GitHubApi implements Disposable {
 					return;
 				}
 				break;
+			case 503: // Service Unavailable
+				Logger.error(ex, scope);
+				provider?.trackRequestException();
+				void showIntegrationRequestFailed500WarningMessage(
+					`${provider?.name ?? 'GitHub'} failed to respond and might be experiencing issues.${
+						provider == null || provider.id === 'github'
+							? ' Please visit the [GitHub status page](https://githubstatus.com) for more information.'
+							: ''
+					}`,
+				);
+				return;
 			default:
-				if (ex.status >= 400 && ex.status < 500) throw new ProviderRequestClientError(ex);
+				if (ex.status >= 400 && ex.status < 500) throw new RequestClientError(ex);
 				break;
 		}
 
@@ -2679,11 +2734,16 @@ export class GitHubApi implements Disposable {
 		}
 	}
 
-	private handleException(ex: Error, provider: Provider | undefined, scope: LogScope | undefined): Error {
+	private handleException(
+		ex: Error,
+		provider: Provider | undefined,
+		scope: LogScope | undefined,
+		silent?: boolean,
+	): Error {
 		Logger.error(ex, scope);
 		// debugger;
 
-		if (ex instanceof AuthenticationError) {
+		if (ex instanceof AuthenticationError && !silent) {
 			void this.showAuthenticationErrorMessage(ex, provider);
 		}
 		return ex;
@@ -2756,62 +2816,45 @@ export class GitHubApi implements Disposable {
 	async searchMyPullRequests(
 		provider: Provider,
 		token: string,
-		options?: { search?: string; user?: string; repos?: string[]; baseUrl?: string },
+		options?: {
+			search?: string;
+			user?: string;
+			repos?: string[];
+			baseUrl?: string;
+			avatarSize?: number;
+			silent?: boolean;
+		},
 		cancellation?: CancellationToken,
 	): Promise<SearchedPullRequest[]> {
 		const scope = getLogScope();
 
-		interface SearchResult {
-			related: {
-				nodes: GitHubDetailedPullRequest[];
-			};
-			authored: {
-				nodes: GitHubDetailedPullRequest[];
-			};
-			assigned: {
-				nodes: GitHubDetailedPullRequest[];
-			};
-			reviewRequested: {
-				nodes: GitHubDetailedPullRequest[];
-			};
-			mentioned: {
-				nodes: GitHubDetailedPullRequest[];
-			};
-		}
+		const limit = Math.min(100, configuration.get('launchpad.experimental.queryLimit') ?? 100);
+
 		try {
-			const query = `query searchPullRequests(
-	$authored: String!
-	$assigned: String!
-	$reviewRequested: String!
-	$mentioned: String!
+			interface SearchResult {
+				search: {
+					issueCount: number;
+					nodes: GitHubPullRequest[];
+				};
+				viewer: {
+					login: string;
+				};
+			}
+
+			const query = `query searchMyPullRequests(
+	$search: String!
+	$avatarSize: Int
 ) {
-	authored: search(first: 100, query: $authored, type: ISSUE) {
+	search(first: ${limit}, query: $search, type: ISSUE) {
+		issueCount
 		nodes {
 			...on PullRequest {
-				${prNodeProperties}
+				${gqlPullRequestFragment}
 			}
 		}
 	}
-	assigned: search(first: 100, query: $assigned, type: ISSUE) {
-		nodes {
-			...on PullRequest {
-				${prNodeProperties}
-			}
-		}
-	}
-	reviewRequested: search(first: 100, query: $reviewRequested, type: ISSUE) {
-		nodes {
-			...on PullRequest {
-				${prNodeProperties}
-			}
-		}
-	}
-	mentioned: search(first: 100, query: $mentioned, type: ISSUE) {
-		nodes {
-			...on PullRequest {
-				${prNodeProperties}
-			}
-		}
+	viewer {
+		login
 	}
 }`;
 
@@ -2821,47 +2864,69 @@ export class GitHubApi implements Disposable {
 				search += ` user:${options.user}`;
 			}
 
-			if (options?.repos != null && options.repos.length > 0) {
-				const repo = '  repo:';
-				search += `${repo}${options.repos.join(repo)}`;
+			if (options?.repos?.length) {
+				search += ` repo:${options.repos.join(' repo:')}`;
 			}
 
-			const baseFilters = 'is:pr is:open archived:false';
-			const resp = await this.graphql<SearchResult>(
+			// Hack for now, ultimately this should be passed in
+			const ignoredRepos = configuration.get('launchpad.ignoredRepositories') ?? [];
+			if (ignoredRepos.length) {
+				search += ` -repo:${ignoredRepos.join(' -repo:')}`;
+			}
+
+			// Hack for now, ultimately this should be passed in
+			const enabledOrgs = configuration.get('launchpad.includedOrganizations') ?? [];
+			if (enabledOrgs.length) {
+				search += ` org:${enabledOrgs.join(' org:')}`;
+			} else {
+				// Hack for now, ultimately this should be passed in
+				const ignoredOrgs = configuration.get('launchpad.ignoredOrganizations') ?? [];
+				if (ignoredOrgs.length) {
+					search += ` -org:${ignoredOrgs.join(' -org:')}`;
+				}
+			}
+
+			const rsp = await this.graphql<SearchResult>(
 				provider,
 				token,
 				query,
 				{
-					authored: `${search} ${baseFilters} author:@me`.trim(),
-					assigned: `${search} ${baseFilters} assignee:@me`.trim(),
-					reviewRequested: `${search} ${baseFilters} review-requested:@me`.trim(),
-					mentioned: `${search} ${baseFilters} mentions:@me`.trim(),
+					search: `is:open is:pr involves:@me archived:false ${search}`.trim(),
 					baseUrl: options?.baseUrl,
+					avatarSize: options?.avatarSize,
 				},
 				scope,
 				cancellation,
 			);
-			if (resp === undefined) return [];
+			if (rsp == null) return [];
 
-			function toQueryResult(pr: GitHubDetailedPullRequest, reason?: string): SearchedPullRequest {
+			const viewer = rsp.viewer.login;
+
+			function toQueryResult(pr: GitHubPullRequest): SearchedPullRequest {
+				const reasons = [];
+				if (pr.author.login === viewer) {
+					reasons.push('authored');
+				}
+				if (pr.assignees.nodes.some(a => a.login === viewer)) {
+					reasons.push('assigned');
+				}
+				if (pr.reviewRequests.nodes.some(r => r.requestedReviewer?.login === viewer)) {
+					reasons.push('review-requested');
+				}
+				if (reasons.length === 0) {
+					reasons.push('mentioned');
+				}
+
 				return {
-					pullRequest: fromGitHubPullRequestDetailed(pr, provider),
-					reasons: reason ? [reason] : [],
+					pullRequest: fromGitHubPullRequest(pr, provider),
+					reasons: reasons,
 				};
 			}
 
-			const results: SearchedPullRequest[] = uniqueWithReasons(
-				[
-					...resp.assigned.nodes.map(pr => toQueryResult(pr, 'assigned')),
-					...resp.reviewRequested.nodes.map(pr => toQueryResult(pr, 'review-requested')),
-					...resp.mentioned.nodes.map(pr => toQueryResult(pr, 'mentioned')),
-					...resp.authored.nodes.map(pr => toQueryResult(pr, 'authored')),
-				],
-				r => r.pullRequest.url,
-			);
+			const results: SearchedPullRequest[] = rsp.search.nodes.map(pr => toQueryResult(pr));
 			return results;
 		} catch (ex) {
-			throw this.handleException(ex, provider, scope);
+			throw this.handleException(ex, provider, scope, options?.silent);
 		}
 	}
 
@@ -2869,43 +2934,63 @@ export class GitHubApi implements Disposable {
 	async searchMyIssues(
 		provider: Provider,
 		token: string,
-		options?: { search?: string; user?: string; repos?: string[]; baseUrl?: string },
+		options?: {
+			search?: string;
+			user?: string;
+			repos?: string[];
+			baseUrl?: string;
+			avatarSize?: number;
+			includeBody?: boolean;
+		},
 		cancellation?: CancellationToken,
 	): Promise<SearchedIssue[] | undefined> {
 		const scope = getLogScope();
+
 		interface SearchResult {
-			related: {
-				nodes: GitHubIssueDetailed[];
-			};
 			authored: {
-				nodes: GitHubIssueDetailed[];
+				nodes: GitHubIssue[];
 			};
 			assigned: {
-				nodes: GitHubIssueDetailed[];
+				nodes: GitHubIssue[];
 			};
 			mentioned: {
-				nodes: GitHubIssueDetailed[];
+				nodes: GitHubIssue[];
 			};
 		}
 
-		const query = `query searchIssues(
+		const issueFragement = `${gqIssueFragment}${
+			options?.includeBody
+				? `
+			body
+			`
+				: ''
+		}`;
+
+		const query = `query searchMyIssues(
 				$authored: String!
 				$assigned: String!
 				$mentioned: String!
+				$avatarSize: Int
 			) {
 				authored: search(first: 100, query: $authored, type: ISSUE) {
 					nodes {
-						${issueNodeProperties}
+						... on Issue {
+							${issueFragement}
+						}
 					}
 				}
 				assigned: search(first: 100, query: $assigned, type: ISSUE) {
 					nodes {
-						${issueNodeProperties}
+						... on Issue {
+							${issueFragement}
+						}
 					}
 				}
 				mentioned: search(first: 100, query: $mentioned, type: ISSUE) {
 					nodes {
-						${issueNodeProperties}
+						... on Issue {
+							${issueFragement}
+						}
 					}
 				}
 			}`;
@@ -2923,7 +3008,7 @@ export class GitHubApi implements Disposable {
 
 		const baseFilters = 'type:issue is:open archived:false';
 		try {
-			const resp = await this.graphql<SearchResult>(
+			const rsp = await this.graphql<SearchResult>(
 				provider,
 				token,
 				query,
@@ -2932,28 +3017,90 @@ export class GitHubApi implements Disposable {
 					assigned: `${search} ${baseFilters} assignee:@me`.trim(),
 					mentioned: `${search} ${baseFilters} mentions:@me`.trim(),
 					baseUrl: options?.baseUrl,
+					avatarSize: options?.avatarSize,
 				},
 				scope,
 				cancellation,
 			);
 
-			function toQueryResult(issue: GitHubIssueDetailed, reason?: string): SearchedIssue {
+			function toQueryResult(issue: GitHubIssue, reason?: string): SearchedIssue {
 				return {
-					issue: fromGitHubIssueDetailed(issue, provider),
+					issue: fromGitHubIssue(issue, provider),
 					reasons: reason ? [reason] : [],
 				};
 			}
 
-			if (resp === undefined) return [];
+			if (rsp == null) return [];
 
 			const results: SearchedIssue[] = uniqueWithReasons(
 				[
-					...resp.assigned.nodes.map(pr => toQueryResult(pr, 'assigned')),
-					...resp.mentioned.nodes.map(pr => toQueryResult(pr, 'mentioned')),
-					...resp.authored.nodes.map(pr => toQueryResult(pr, 'authored')),
+					...rsp.assigned.nodes.map(pr => toQueryResult(pr, 'assigned')),
+					...rsp.mentioned.nodes.map(pr => toQueryResult(pr, 'mentioned')),
+					...rsp.authored.nodes.map(pr => toQueryResult(pr, 'authored')),
 				],
 				r => r.issue.url,
 			);
+			return results;
+		} catch (ex) {
+			throw this.handleException(ex, provider, scope);
+		}
+	}
+
+	@debug<GitHubApi['searchPullRequests']>({ args: { 0: p => p.name, 1: '<token>' } })
+	async searchPullRequests(
+		provider: Provider,
+		token: string,
+		options?: { search?: string; user?: string; repos?: string[]; baseUrl?: string; avatarSize?: number },
+		cancellation?: CancellationToken,
+	): Promise<PullRequest[]> {
+		const scope = getLogScope();
+
+		interface SearchResult {
+			search: {
+				nodes: GitHubPullRequest[];
+			};
+		}
+
+		try {
+			const query = `query searchPullRequests(
+	$searchQuery: String!
+	$avatarSize: Int
+) {
+	search(first: 10, query: $searchQuery, type: ISSUE) {
+		nodes {
+			...on PullRequest {
+				${gqlPullRequestFragment}
+			}
+		}
+	}
+}`;
+
+			let search = options?.search?.trim() ?? '';
+
+			if (options?.user) {
+				search += ` user:${options.user}`;
+			}
+
+			if (options?.repos != null && options.repos.length > 0) {
+				const repo = ' repo:';
+				search += `${repo}${options.repos.join(repo)}`;
+			}
+
+			const rsp = await this.graphql<SearchResult>(
+				provider,
+				token,
+				query,
+				{
+					searchQuery: `is:pr is:open archived:false ${search.trim()}`,
+					baseUrl: options?.baseUrl,
+					avatarSize: options?.avatarSize,
+				},
+				scope,
+				cancellation,
+			);
+			if (rsp == null) return [];
+
+			const results = rsp.search.nodes.map(pr => fromGitHubPullRequest(pr, provider));
 			return results;
 		} catch (ex) {
 			throw this.handleException(ex, provider, scope);
@@ -2971,7 +3118,7 @@ export class GitHubApi implements Disposable {
 	): Promise<boolean> {
 		const scope = getLogScope();
 		interface QueryResult {
-			pullRequest: GitHubPullRequest | null | undefined;
+			pullRequest: GitHubPullRequestLite | null | undefined;
 		}
 
 		let githubMergeStrategy;
@@ -3005,7 +3152,7 @@ export class GitHubApi implements Disposable {
 	}
 }`;
 
-			const resp = await this.graphql<QueryResult>(
+			const rsp = await this.graphql<QueryResult>(
 				provider,
 				token,
 				query,
@@ -3019,7 +3166,7 @@ export class GitHubApi implements Disposable {
 				cancellation,
 			);
 
-			return resp?.pullRequest?.id === nodeId;
+			return rsp?.pullRequest?.id === nodeId;
 		} catch (ex) {
 			throw this.handleException(ex, provider, scope);
 		}

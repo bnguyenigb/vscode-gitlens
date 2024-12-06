@@ -1,14 +1,15 @@
 import type { TextDocumentShowOptions, TextEditor, Uri } from 'vscode';
-import { Commands, GlyphChars, quickPickTitleMaxChars } from '../constants';
+import { GlyphChars, quickPickTitleMaxChars } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { GitUri } from '../git/gitUri';
 import { isBranchReference, shortenRevision } from '../git/models/reference';
 import { showNoRepositoryWarningMessage } from '../messages';
 import { showStashPicker } from '../quickpicks/commitPicker';
 import { showReferencePicker } from '../quickpicks/referencePicker';
-import { command, executeCommand } from '../system/command';
 import { basename } from '../system/path';
 import { pad } from '../system/string';
+import { command, executeCommand } from '../system/vscode/command';
 import { ActiveEditorCommand, getCommandUri } from './base';
 import type { DiffWithCommandArgs } from './diffWith';
 

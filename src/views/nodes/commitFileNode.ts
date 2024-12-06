@@ -1,8 +1,9 @@
 import type { Command, Selection } from 'vscode';
-import { MarkdownString, TreeItem, TreeItemCollapsibleState, Uri } from 'vscode';
+import { TreeItem, TreeItemCollapsibleState, Uri } from 'vscode';
 import type { DiffWithPreviousCommandArgs } from '../../commands/diffWithPrevious';
-import type { TreeViewRefFileNodeTypes } from '../../constants';
-import { Commands, Schemes } from '../../constants';
+import { Schemes } from '../../constants';
+import { Commands } from '../../constants.commands';
+import type { TreeViewRefFileNodeTypes } from '../../constants.views';
 import { StatusFileFormatter } from '../../git/formatters/statusFormatter';
 import { GitUri } from '../../git/gitUri';
 import type { GitBranch } from '../../git/models/branch';
@@ -10,8 +11,11 @@ import type { GitCommit } from '../../git/models/commit';
 import type { GitFile } from '../../git/models/file';
 import { getGitFileStatusIcon } from '../../git/models/file';
 import type { GitRevisionReference } from '../../git/models/reference';
-import { joinPaths, relativeDir } from '../../system/path';
+import { joinPaths } from '../../system/path';
+import { relativeDir } from '../../system/vscode/path';
 import type { ViewsWithCommits, ViewsWithStashes } from '../viewBase';
+import { createViewDecorationUri } from '../viewDecorationProvider';
+import { getFileTooltipMarkdown } from './abstract/viewFileNode';
 import type { ViewNode } from './abstract/viewNode';
 import { ContextValues, getViewNodeId } from './abstract/viewNode';
 import { ViewRefFileNode } from './abstract/viewRefNode';
@@ -79,6 +83,7 @@ export abstract class CommitFileNodeBase<
 		item.id = this.id;
 		item.contextValue = this.contextValue;
 		item.description = this.description;
+
 		if (this.view.config.files.icon === 'type') {
 			item.resourceUri = Uri.from({
 				scheme: Schemes.Git,
@@ -88,18 +93,18 @@ export abstract class CommitFileNodeBase<
 					// Ensure we use the fsPath here, otherwise the url won't open properly
 					path: this.uri.fsPath,
 					ref: this.uri.sha,
-					decoration: `gitlens-view://commit-file/status/${this.file.status}`,
+					decoration: createViewDecorationUri('commit-file', { status: this.file.status }).toString(),
 				}),
 			});
 		} else {
-			item.resourceUri = Uri.parse(`gitlens-view://commit-file/status/${this.file.status}`);
+			item.resourceUri = createViewDecorationUri('commit-file', { status: this.file.status });
 			const icon = getGitFileStatusIcon(this.file.status);
 			item.iconPath = {
 				dark: this.view.container.context.asAbsolutePath(joinPaths('images', 'dark', icon)),
 				light: this.view.container.context.asAbsolutePath(joinPaths('images', 'light', icon)),
 			};
 		}
-		item.tooltip = this.tooltip;
+		item.tooltip = getFileTooltipMarkdown(this.file);
 		item.command = this.getCommand();
 
 		// Only cache the label for a single refresh (its only cached because it is used externally for sorting)
@@ -149,19 +154,6 @@ export abstract class CommitFileNodeBase<
 	set relativePath(value: string | undefined) {
 		this._relativePath = value;
 		this._label = undefined;
-	}
-
-	private get tooltip() {
-		const tooltip = StatusFileFormatter.fromTemplate(
-			`\${file}\${'&nbsp;&nbsp;\u2022&nbsp;&nbsp;'changesDetail}\${'&nbsp;\\\n'directory}&nbsp;\n\n\${status}\${ (originalPath)}`,
-			this.file,
-		);
-
-		const markdown = new MarkdownString(tooltip, true);
-		markdown.supportHtml = true;
-		markdown.isTrusted = true;
-
-		return markdown;
 	}
 
 	override getCommand(): Command | undefined {

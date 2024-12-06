@@ -1,13 +1,13 @@
 import type { TextDocumentShowOptions, TextEditor, Uri } from 'vscode';
 import { Range, window } from 'vscode';
 import type { FileAnnotationType } from '../config';
-import { Commands } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { GitUri, isGitUri } from '../git/gitUri';
 import { showGenericErrorMessage } from '../messages';
-import { command } from '../system/command';
 import { Logger } from '../system/logger';
-import { findOrOpenEditor } from '../system/utils';
+import { command } from '../system/vscode/command';
+import { findOrOpenEditor } from '../system/vscode/utils';
 import { ActiveEditorCommand, getCommandUri } from './base';
 
 export interface OpenWorkingFileCommandArgs {

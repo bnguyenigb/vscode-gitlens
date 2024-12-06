@@ -1,16 +1,16 @@
 import type { CancellationToken, ConfigurationChangeEvent, Disposable } from 'vscode';
 import { ProgressLocation, TreeItem, TreeItemCollapsibleState, window } from 'vscode';
 import type { TagsViewConfig, ViewBranchesLayout, ViewFilesLayout } from '../config';
-import { Commands } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { GitUri } from '../git/gitUri';
 import type { GitTagReference } from '../git/models/reference';
 import { getReferenceLabel } from '../git/models/reference';
 import type { RepositoryChangeEvent } from '../git/models/repository';
 import { groupRepositories, RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
-import { executeCommand } from '../system/command';
-import { configuration } from '../system/configuration';
 import { gate } from '../system/decorators/gate';
+import { executeCommand } from '../system/vscode/command';
+import { configuration } from '../system/vscode/configuration';
 import { RepositoriesSubscribeableNode } from './nodes/abstract/repositoriesSubscribeableNode';
 import { RepositoryFolderNode } from './nodes/abstract/repositoryFolderNode';
 import type { ViewNode } from './nodes/abstract/viewNode';
@@ -35,6 +35,9 @@ export class TagsRepositoryNode extends RepositoryFolderNode<TagsView, TagsNode>
 
 export class TagsViewNode extends RepositoriesSubscribeableNode<TagsView, TagsRepositoryNode> {
 	async getChildren(): Promise<ViewNode[]> {
+		this.view.description = this.view.getViewDescription();
+		this.view.message = undefined;
+
 		if (this.children == null) {
 			let repositories = this.view.container.git.openRepositories;
 			if (configuration.get('views.collapseWorktreesWhenPossible')) {
@@ -50,8 +53,6 @@ export class TagsViewNode extends RepositoriesSubscribeableNode<TagsView, TagsRe
 				return [];
 			}
 
-			this.view.message = undefined;
-
 			const splat = repositories.length === 1;
 			this.children = repositories.map(
 				r => new TagsRepositoryNode(GitUri.fromRepoPath(r.path), this.view, this, r, splat),
@@ -61,23 +62,18 @@ export class TagsViewNode extends RepositoriesSubscribeableNode<TagsView, TagsRe
 		if (this.children.length === 1) {
 			const [child] = this.children;
 
-			const tags = await child.repo.getTags();
+			const tags = await child.repo.git.getTags();
 			if (tags.values.length === 0) {
 				this.view.message = 'No tags could be found.';
-				this.view.title = 'Tags';
-
 				void child.ensureSubscription();
 
 				return [];
 			}
 
-			this.view.message = undefined;
-			this.view.title = `Tags (${tags.values.length})`;
+			this.view.description = this.view.getViewDescription(tags.values.length);
 
 			return child.getChildren();
 		}
-
-		this.view.title = 'Tags';
 
 		return this.children;
 	}
@@ -91,8 +87,8 @@ export class TagsViewNode extends RepositoriesSubscribeableNode<TagsView, TagsRe
 export class TagsView extends ViewBase<'tags', TagsViewNode, TagsViewConfig> {
 	protected readonly configKey = 'tags';
 
-	constructor(container: Container) {
-		super(container, 'tags', 'Tags', 'tagsView');
+	constructor(container: Container, grouped?: boolean) {
+		super(container, 'tags', 'Tags', 'tagsView', grouped);
 	}
 
 	override get canReveal(): boolean {
@@ -100,7 +96,7 @@ export class TagsView extends ViewBase<'tags', TagsViewNode, TagsViewConfig> {
 	}
 
 	override get canSelectMany(): boolean {
-		return true;
+		return this.container.prereleaseOrDebugging;
 	}
 
 	protected getRoot() {
@@ -108,8 +104,6 @@ export class TagsView extends ViewBase<'tags', TagsViewNode, TagsViewConfig> {
 	}
 
 	protected registerCommands(): Disposable[] {
-		void this.container.viewCommands;
-
 		return [
 			registerViewCommand(
 				this.getQualifiedCommand('copy'),
@@ -221,7 +215,7 @@ export class TagsView extends ViewBase<'tags', TagsViewNode, TagsViewConfig> {
 				})} in the side bar...`,
 				cancellable: true,
 			},
-			async (progress, token) => {
+			async (_progress, token) => {
 				const node = await this.findTag(tag, token);
 				if (node == null) return undefined;
 

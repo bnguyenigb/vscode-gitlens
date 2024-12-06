@@ -1,14 +1,18 @@
-import type { ConfigurationChangeEvent, Disposable, ViewColumn } from 'vscode';
-import { ConfigurationTarget, workspace } from 'vscode';
+import type { ConfigurationChangeEvent, ViewColumn } from 'vscode';
+import { ConfigurationTarget, Disposable, workspace } from 'vscode';
 import { extensionPrefix } from '../../constants';
+import { IssueIntegrationId } from '../../constants.integrations';
+import type { WebviewTelemetryContext } from '../../constants.telemetry';
 import type { Container } from '../../container';
 import { CommitFormatter } from '../../git/formatters/commitFormatter';
 import { GitCommit, GitCommitIdentity } from '../../git/models/commit';
 import { GitFileChange, GitFileIndexStatus } from '../../git/models/file';
 import { PullRequest } from '../../git/models/pullRequest';
-import type { ConfigPath, CoreConfigPath } from '../../system/configuration';
-import { configuration } from '../../system/configuration';
+import type { SubscriptionChangeEvent } from '../../plus/gk/account/subscriptionService';
+import type { ConnectionStateChangeEvent } from '../../plus/integrations/integrationService';
 import { map } from '../../system/iterable';
+import type { ConfigPath, CoreConfigPath } from '../../system/vscode/configuration';
+import { configuration } from '../../system/vscode/configuration';
 import type { CustomConfigPath, IpcMessage } from '../protocol';
 import {
 	assertsConfigKeyValue,
@@ -18,7 +22,12 @@ import {
 } from '../protocol';
 import type { WebviewHost, WebviewProvider } from '../webviewProvider';
 import type { State } from './protocol';
-import { DidOpenAnchorNotification, GenerateConfigurationPreviewRequest } from './protocol';
+import {
+	DidChangeAccountNotification,
+	DidChangeConnectedJiraNotification,
+	DidOpenAnchorNotification,
+	GenerateConfigurationPreviewRequest,
+} from './protocol';
 import type { SettingsWebviewShowingArgs } from './registration';
 
 export class SettingsWebviewProvider implements WebviewProvider<State, State, SettingsWebviewShowingArgs> {
@@ -29,14 +38,44 @@ export class SettingsWebviewProvider implements WebviewProvider<State, State, Se
 		protected readonly container: Container,
 		protected readonly host: WebviewHost,
 	) {
-		this._disposable = configuration.onDidChangeAny(this.onAnyConfigurationChanged, this);
+		this._disposable = Disposable.from(
+			configuration.onDidChangeAny(this.onAnyConfigurationChanged, this),
+			container.subscription.onDidChange(this.onSubscriptionChanged, this),
+			container.integrations.onDidChangeConnectionState(this.onIntegrationConnectionStateChanged, this),
+		);
 	}
 
 	dispose() {
 		this._disposable.dispose();
 	}
 
-	includeBootstrap(): State {
+	getTelemetryContext(): WebviewTelemetryContext {
+		return {
+			...this.host.getTelemetryContext(),
+		};
+	}
+
+	onSubscriptionChanged(e: SubscriptionChangeEvent) {
+		void this.host.notify(DidChangeAccountNotification, { hasAccount: e.current.account != null });
+	}
+
+	onIntegrationConnectionStateChanged(e: ConnectionStateChangeEvent) {
+		if (e.key === 'jira') {
+			void this.host.notify(DidChangeConnectedJiraNotification, { hasConnectedJira: e.reason === 'connected' });
+		}
+	}
+
+	async getAccountState(): Promise<boolean> {
+		return (await this.container.subscription.getSubscription()).account != null;
+	}
+
+	async getJiraConnected(): Promise<boolean> {
+		const jira = await this.container.integrations.get(IssueIntegrationId.Jira);
+		if (jira == null) return false;
+		return jira.maybeConnected ?? jira.isConnected();
+	}
+
+	async includeBootstrap(): Promise<State> {
 		const scopes: ['user' | 'workspace', string][] = [['user', 'User']];
 		if (workspace.workspaceFolders?.length) {
 			scopes.push(['workspace', 'Workspace']);
@@ -50,6 +89,8 @@ export class SettingsWebviewProvider implements WebviewProvider<State, State, Se
 			customSettings: this.getCustomSettings(),
 			scope: 'user',
 			scopes: scopes,
+			hasAccount: await this.getAccountState(),
+			hasConnectedJira: await this.getJiraConnected(),
 		};
 	}
 
@@ -61,7 +102,7 @@ export class SettingsWebviewProvider implements WebviewProvider<State, State, Se
 		loading: boolean,
 		_options: { column?: ViewColumn; preserveFocus?: boolean },
 		...args: SettingsWebviewShowingArgs
-	): boolean | Promise<boolean> {
+	): [boolean, Record<`context.${string}`, string | number | boolean> | undefined] {
 		const anchor = args[0];
 		if (anchor && typeof anchor === 'string') {
 			if (!loading && this.host.ready && this.host.visible) {
@@ -72,13 +113,13 @@ export class SettingsWebviewProvider implements WebviewProvider<State, State, Se
 							scrollBehavior: 'smooth',
 						}),
 				);
-				return true;
+				return [true, undefined];
 			}
 
 			this._pendingJumpToAnchor = anchor;
 		}
 
-		return true;
+		return [true, undefined];
 	}
 
 	onActiveChanged(active: boolean): void {
@@ -185,6 +226,7 @@ export class SettingsWebviewProvider implements WebviewProvider<State, State, Se
 							pr = new PullRequest(
 								{ id: 'github', name: 'GitHub', domain: 'github.com', icon: 'github' },
 								{
+									id: 'eamodio',
 									name: 'Eric Amodio',
 									avatarUrl: 'https://avatars1.githubusercontent.com/u/641685?s=32&v=4',
 									url: 'https://github.com/eamodio',

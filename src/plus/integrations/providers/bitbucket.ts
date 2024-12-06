@@ -1,4 +1,5 @@
-import type { AuthenticationSession } from 'vscode';
+import type { AuthenticationSession, CancellationToken } from 'vscode';
+import { HostingIntegrationId } from '../../../constants.integrations';
 import type { Account } from '../../../git/models/author';
 import type { DefaultBranch } from '../../../git/models/defaultBranch';
 import type { IssueOrPullRequest, SearchedIssue } from '../../../git/models/issue';
@@ -12,7 +13,7 @@ import type { RepositoryMetadata } from '../../../git/models/repositoryMetadata'
 import type { IntegrationAuthenticationProviderDescriptor } from '../authentication/integrationAuthentication';
 import type { ResourceDescriptor } from '../integration';
 import { HostingIntegration } from '../integration';
-import { HostingIntegrationId, providersMetadata } from './models';
+import { providersMetadata } from './models';
 
 const metadata = providersMetadata[HostingIntegrationId.Bitbucket];
 const authProvider = Object.freeze({ id: metadata.id, scopes: metadata.scopes });
@@ -38,17 +39,9 @@ export class BitbucketIntegration extends HostingIntegration<
 		return 'https://api.bitbucket.org/2.0';
 	}
 
-	// TODO: implement
-	protected override async getProviderCurrentAccount(
-		_session: AuthenticationSession,
-		_options?: { avatarSize?: number },
-	): Promise<Account | undefined> {
-		return Promise.resolve(undefined);
-	}
-
 	protected override async mergeProviderPullRequest(
 		_session: AuthenticationSession,
-		_pr: PullRequest | { id: string; headRefSha: string },
+		_pr: PullRequest,
 		_options?: {
 			mergeMethod?: PullRequestMergeMethod;
 		},
@@ -116,6 +109,7 @@ export class BitbucketIntegration extends HostingIntegration<
 	protected override async getProviderRepositoryMetadata(
 		_session: AuthenticationSession,
 		_repo: BitbucketRepositoryDescriptor,
+		_cancellation?: CancellationToken,
 	): Promise<RepositoryMetadata | undefined> {
 		return Promise.resolve(undefined);
 	}

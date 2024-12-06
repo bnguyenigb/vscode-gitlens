@@ -1,4 +1,5 @@
 @use '../../shared/styles/details-base';
+@use '../../shared/styles/utils';
 
 body {
 	--gk-menu-border-color: var(--vscode-menu-border);
@@ -9,6 +10,7 @@ body {
 	--gk-tooltip-padding: 0.4rem 0.8rem;
 	--gk-divider-color: var(--color-background--level-05);
 	--gk-button-ghost-color: var(--color-foreground--50);
+	--gitlens-tree-foreground: var(--vscode-sideBar-foreground, var(--vscode-foreground));
 }
 
 gk-menu {
@@ -47,19 +49,19 @@ gk-menu-item {
 		color: var(--vscode-foreground);
 		text-decoration: none;
 
-		.vscode-dark & {
+		@include utils.dark-theme($selectorPostfix: ' &') {
 			background-color: var(--color-background--lighten-15);
 		}
-		.vscode-light & {
+		@include utils.light-theme($selectorPostfix: ' &') {
 			background-color: var(--color-background--darken-15);
 		}
 	}
 
 	&.is-active {
-		.vscode-dark & {
+		@include utils.dark-theme($selectorPostfix: ' &') {
 			background-color: var(--color-background--lighten-10);
 		}
-		.vscode-light & {
+		@include utils.light-theme($selectorPostfix: ' &') {
 			background-color: var(--color-background--darken-10);
 		}
 	}
@@ -142,6 +144,10 @@ gk-menu-item {
 	font-size: 1.6rem;
 	font-weight: 600;
 	margin: 0.2rem 0 0.8rem;
+
+	&__badge {
+		float: right;
+	}
 }
 
 .message-block__text strong:not(:only-child) {
@@ -211,6 +217,12 @@ gk-menu-item {
 			outline-offset: -1px;
 		}
 
+		&:disabled {
+			opacity: 0.4;
+			cursor: not-allowed;
+			pointer-events: none;
+		}
+
 		&--text {
 			overflow: hidden;
 			white-space: nowrap;
@@ -261,11 +273,21 @@ gk-menu-item {
 		padding-right: 2.4rem;
 	}
 
+	&__menu {
+		position: absolute;
+		top: 0.8rem;
+		right: 0;
+	}
+
 	&--group {
 		display: flex;
 		flex-direction: row;
 		align-items: stretch;
 		gap: 0.6rem;
+	}
+
+	&--with-menu {
+		position: relative;
 	}
 }
 

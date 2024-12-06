@@ -1,4 +1,4 @@
-import { Disposable, MarkdownString, TreeItem, TreeItemCollapsibleState, Uri } from 'vscode';
+import { Disposable, MarkdownString, TreeItem, TreeItemCollapsibleState } from 'vscode';
 import { GlyphChars } from '../../constants';
 import { Features } from '../../features';
 import type { GitUri } from '../../git/gitUri';
@@ -7,6 +7,7 @@ import { getHighlanderProviders } from '../../git/models/remote';
 import type { RepositoryChangeEvent, RepositoryFileSystemChangeEvent } from '../../git/models/repository';
 import { Repository, RepositoryChange, RepositoryChangeComparisonMode } from '../../git/models/repository';
 import type { GitStatus } from '../../git/models/status';
+import { getRepositoryStatusIconPath } from '../../git/utils/repository-utils';
 import type {
 	CloudWorkspace,
 	CloudWorkspaceRepositoryDescriptor,
@@ -20,6 +21,7 @@ import { weakEvent } from '../../system/event';
 import { disposableInterval } from '../../system/function';
 import { pad } from '../../system/string';
 import type { ViewsWithRepositories } from '../viewBase';
+import { createViewDecorationUri } from '../viewDecorationProvider';
 import { SubscribeableViewNode } from './abstract/subscribeableViewNode';
 import type { AmbientContext, ViewNode } from './abstract/viewNode';
 import { ContextValues, getViewNodeId } from './abstract/viewNode';
@@ -53,7 +55,7 @@ export class RepositoryNode extends SubscribeableViewNode<'repository', ViewsWit
 		this.updateContext({ ...context, repository: this.repo });
 		this._uniqueId = getViewNodeId(this.type, this.context);
 
-		this._status = this.repo.getStatus();
+		this._status = this.repo.git.getStatus();
 	}
 
 	override get id(): string {
@@ -125,7 +127,7 @@ export class RepositoryNode extends SubscribeableViewNode<'repository', ViewsWit
 								);
 							}
 						}
-					} else {
+					} else if (!status.detached) {
 						children.push(new BranchTrackingStatusNode(this.view, this, branch, status, 'none', true));
 					}
 				}
@@ -157,7 +159,8 @@ export class RepositoryNode extends SubscribeableViewNode<'repository', ViewsWit
 						new BranchNode(this.uri, this.view, this, this.repo, branch, true, {
 							showAsCommits: true,
 							showComparison: false,
-							showCurrentOrOpened: false,
+							showStashes: this.view.config.branches.showStashes,
+							showStatusDecorationOnly: true,
 							showStatus: false,
 							showTracking: false,
 						}),
@@ -173,7 +176,7 @@ export class RepositoryNode extends SubscribeableViewNode<'repository', ViewsWit
 				children.push(new RemotesNode(this.uri, this.view, this, this.repo));
 			}
 
-			if (this.view.config.showStashes && (await this.repo.supports(Features.Stashes))) {
+			if (this.view.config.showStashes && (await this.repo.git.supports(Features.Stashes))) {
 				children.push(new StashesNode(this.uri, this.view, this, this.repo));
 			}
 
@@ -181,7 +184,7 @@ export class RepositoryNode extends SubscribeableViewNode<'repository', ViewsWit
 				children.push(new TagsNode(this.uri, this.view, this, this.repo));
 			}
 
-			if (this.view.config.showWorktrees && (await this.repo.supports(Features.Worktrees))) {
+			if (this.view.config.showWorktrees && (await this.repo.git.supports(Features.Worktrees))) {
 				children.push(new WorktreesNode(this.uri, this.view, this, this.repo));
 			}
 
@@ -226,20 +229,11 @@ export class RepositoryNode extends SubscribeableViewNode<'repository', ViewsWit
 			}
 		}
 
-		let iconType: '' | '-solid' | '-cloud' = '';
-		let iconColor: '' | '-blue' | '-green' | '-yellow' | '-red' = '';
-
-		// TODO@axosoft-ramint Temporary workaround, remove when our git commands work on closed repos.
-		if (this.repo.closed) {
-			contextValue += '+closed';
-			iconType = '';
-		} else {
-			iconType = '-solid';
-		}
-
 		if (this.repo.virtual) {
 			contextValue += '+virtual';
-			iconType = '-cloud';
+		} else if (this.repo.closed) {
+			// TODO@axosoft-ramint Temporary workaround, remove when our git commands work on closed repos.
+			contextValue += '+closed';
 		}
 
 		const status = await this._status;
@@ -283,11 +277,9 @@ export class RepositoryNode extends SubscribeableViewNode<'repository', ViewsWit
 
 				if (status.state.behind) {
 					contextValue += '+behind';
-					iconColor = '-red';
 				}
 				if (status.state.ahead) {
 					contextValue += '+ahead';
-					iconColor = status.state.behind ? '-yellow' : '-green';
 				}
 			}
 
@@ -297,7 +289,6 @@ export class RepositoryNode extends SubscribeableViewNode<'repository', ViewsWit
 					prefix: '\n',
 					separator: '\n',
 				})}`;
-				iconColor = '-blue';
 			}
 		}
 
@@ -316,13 +307,10 @@ export class RepositoryNode extends SubscribeableViewNode<'repository', ViewsWit
 		item.description = `${description ?? ''}${
 			lastFetched ? `${pad(GlyphChars.Dot, 1, 1)}Last fetched ${Repository.formatLastFetched(lastFetched)}` : ''
 		}`;
-		item.iconPath = {
-			dark: this.view.container.context.asAbsolutePath(`images/dark/icon-repo${iconType}${iconColor}.svg`),
-			light: this.view.container.context.asAbsolutePath(`images/light/icon-repo${iconType}${iconColor}.svg`),
-		};
+		item.iconPath = getRepositoryStatusIconPath(this.view.container, this.repo, status);
 
 		if (workspace != null && !this.repo.closed) {
-			item.resourceUri = Uri.parse(`gitlens-view://workspaces/repository/open`);
+			item.resourceUri = createViewDecorationUri('repository', { state: 'open', workspace: true });
 		}
 
 		const markdown = new MarkdownString(tooltip, true);
@@ -355,7 +343,7 @@ export class RepositoryNode extends SubscribeableViewNode<'repository', ViewsWit
 		super.refresh(reset);
 
 		if (reset) {
-			this._status = this.repo.getStatus();
+			this._status = this.repo.git.getStatus();
 		}
 
 		await this.ensureSubscription();
@@ -422,7 +410,7 @@ export class RepositoryNode extends SubscribeableViewNode<'repository', ViewsWit
 		},
 	})
 	private async onFileSystemChanged(_e: RepositoryFileSystemChangeEvent) {
-		this._status = this.repo.getStatus();
+		this._status = this.repo.git.getStatus();
 
 		if (this.children !== undefined) {
 			const status = await this._status;

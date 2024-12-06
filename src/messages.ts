@@ -1,13 +1,16 @@
 import type { MessageItem } from 'vscode';
 import { ConfigurationTarget, window } from 'vscode';
 import type { SuppressedMessages } from './config';
-import { Commands } from './constants';
+import { urls } from './constants';
+import { Commands } from './constants.commands';
 import type { BlameIgnoreRevsFileError } from './git/errors';
 import { BlameIgnoreRevsFileBadRevisionError } from './git/errors';
 import type { GitCommit } from './git/models/commit';
-import { executeCommand } from './system/command';
-import { configuration } from './system/configuration';
+import { createMarkdownCommandLink } from './system/commands';
 import { Logger } from './system/logger';
+import { executeCommand, executeCoreCommand } from './system/vscode/command';
+import { configuration } from './system/vscode/configuration';
+import { openUrl } from './system/vscode/utils';
 
 export function showBlameInvalidIgnoreRevsFileWarningMessage(
 	ex: BlameIgnoreRevsFileError | BlameIgnoreRevsFileBadRevisionError,
@@ -135,11 +138,24 @@ export function showGitVersionUnsupportedErrorMessage(
 	);
 }
 
-export function showPreReleaseExpiredErrorMessage(version: string) {
-	return showMessage(
+export async function showPreReleaseExpiredErrorMessage(version: string) {
+	const upgrade = { title: 'Upgrade' };
+	const switchToRelease = { title: 'Switch to Release Version' };
+	const result = await showMessage(
 		'error',
-		`This GitLens pre-release version (${version}) has expired. Please upgrade to a more recent version.`,
+		`This pre-release version (${version}) of GitLens has expired. Please upgrade to a more recent pre-release, or switch to the release version.`,
+		undefined,
+		null,
+		upgrade,
 	);
+
+	if (result === upgrade) {
+		void executeCoreCommand('workbench.extensions.installExtension', 'eamodio.gitlens', {
+			installPreReleaseVersion: true,
+		});
+	} else if (result === switchToRelease) {
+		void executeCoreCommand('workbench.extensions.action.switchToRelease', 'eamodio.gitlens');
+	}
 }
 
 export function showLineUncommittedWarningMessage(message: string): Promise<MessageItem | undefined> {
@@ -156,6 +172,30 @@ export function showRebaseSwitchToTextWarningMessage(): Promise<MessageItem | un
 		'Closing either the git-rebase-todo file or the Rebase Editor will start the rebase.',
 		'suppressRebaseSwitchToTextWarning',
 	);
+}
+
+export function showGkDisconnectedTooManyFailedRequestsWarningMessage(): Promise<MessageItem | undefined> {
+	return showMessage(
+		'error',
+		`Requests to GitKraken have stopped being sent for this session, because of too many failed requests.`,
+		'suppressGkDisconnectedTooManyFailedRequestsWarningMessage',
+		undefined,
+		{
+			title: 'OK',
+		},
+	);
+}
+
+export function showGkRequestFailed500WarningMessage(message: string): Promise<MessageItem | undefined> {
+	return showMessage('error', message, 'suppressGkRequestFailed500Warning', undefined, {
+		title: 'OK',
+	});
+}
+
+export function showGkRequestTimedOutWarningMessage(): Promise<MessageItem | undefined> {
+	return showMessage('error', `GitKraken request timed out.`, 'suppressGkRequestTimedOutWarning', undefined, {
+		title: 'OK',
+	});
 }
 
 export function showIntegrationDisconnectedTooManyFailedRequestsWarningMessage(
@@ -190,18 +230,26 @@ export function showIntegrationRequestTimedOutWarningMessage(providerName: strin
 	);
 }
 
-export async function showWhatsNewMessage(version: string) {
-	const reset = { title: 'Switch to New Layout' };
+export async function showWhatsNewMessage(majorVersion: string) {
+	const confirm = { title: 'OK', isCloseAffordance: true };
+	const releaseNotes = { title: 'View Release Notes' };
 	const result = await showMessage(
 		'info',
-		`Upgraded to GitLens ${version} — [see what's new](https://help.gitkraken.com/gitlens/gitlens-release-notes-current/ "See what's new in GitLens ${version}").\nWe've reimagined and rearranged our views for greater focus and productivity, and recommend switching to the new layout — [learn more and tell us what you think](https://github.com/gitkraken/vscode-gitlens/discussions/2721 "Learn more about what's changed")!`,
+		`Upgraded to GitLens ${majorVersion}${
+			majorVersion === '16'
+				? ` with an all new [Home view](${createMarkdownCommandLink(Commands.ShowHomeView, {
+						source: 'whatsnew',
+				  })} "Show Home view") reimagined as a hub for your current, future, and recent work, [consolidated Source Control views](command:gitlens.views.scm.grouped.focus "Show GitLens view"), and much more.`
+				: " — see what's new."
+		}`,
 		undefined,
 		null,
-		reset,
+		releaseNotes,
+		confirm,
 	);
 
-	if (result === reset) {
-		void executeCommand(Commands.ResetViewsLayout);
+	if (result === releaseNotes) {
+		void openUrl(urls.releaseNotes);
 	}
 }
 

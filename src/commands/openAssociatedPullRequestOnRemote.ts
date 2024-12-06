@@ -1,10 +1,10 @@
 import type { TextEditor, Uri } from 'vscode';
-import { Commands } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { GitUri } from '../git/gitUri';
 import { getRepositoryOrShowPicker } from '../quickpicks/repositoryPicker';
-import { command, executeCommand } from '../system/command';
 import { Logger } from '../system/logger';
+import { command, executeCommand } from '../system/vscode/command';
 import { ActiveEditorCommand, getCommandUri } from './base';
 import type { OpenPullRequestOnRemoteCommandArgs } from './openPullRequestOnRemote';
 
@@ -40,8 +40,8 @@ export class OpenAssociatedPullRequestOnRemoteCommand extends ActiveEditorComman
 				});
 				if (repo == null) return;
 
-				const branch = await repo?.getBranch();
-				const pr = await branch?.getAssociatedPullRequest();
+				const branch = await repo?.git.getBranch();
+				const pr = await branch?.getAssociatedPullRequest({ expiryOverride: true });
 
 				args =
 					pr != null

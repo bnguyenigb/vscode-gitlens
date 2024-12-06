@@ -1,6 +1,7 @@
 import { ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
 import { GitUri } from '../../git/gitUri';
 import type { Repository } from '../../git/models/repository';
+import { getOpenedWorktreesByBranch } from '../../git/models/worktree';
 import { makeHierarchical } from '../../system/array';
 import { debug } from '../../system/decorators/log';
 import type { ViewsWithBranchesNode } from '../viewBase';
@@ -34,19 +35,17 @@ export class BranchesNode extends CacheableChildrenViewNode<'branches', ViewsWit
 
 	async getChildren(): Promise<ViewNode[]> {
 		if (this.children == null) {
-			const branches = await this.repo.getBranches({
+			const branches = await this.repo.git.getBranches({
 				// only show local branches
 				filter: b => !b.remote,
-				sort: { current: false },
+				sort: this.view.config.showCurrentBranchOnTop
+					? {
+							current: true,
+							openedWorktreesByBranch: getOpenedWorktreesByBranch(this.context.worktreesByBranch),
+					  }
+					: { current: false },
 			});
 			if (branches.values.length === 0) return [new MessageNode(this.view, this, 'No branches could be found.')];
-
-			// if (configuration.get('views.collapseWorktreesWhenPossible')) {
-			// 	sortBranches(branches.values, {
-			// 		current: true,
-			// 		openWorktreeBranches: this.context.openWorktreeBranches,
-			// 	});
-			// }
 
 			// TODO@eamodio handle paging
 			const branchNodes = branches.values.map(
@@ -63,6 +62,7 @@ export class BranchesNode extends CacheableChildrenViewNode<'branches', ViewsWit
 								this.view.type === 'repositories'
 									? this.view.config.branches.showBranchComparison
 									: this.view.config.showBranchComparison,
+							showStashes: this.view.config.showStashes,
 						},
 					),
 			);
@@ -90,7 +90,7 @@ export class BranchesNode extends CacheableChildrenViewNode<'branches', ViewsWit
 		const item = new TreeItem('Branches', TreeItemCollapsibleState.Collapsed);
 		item.id = this.id;
 		item.contextValue = ContextValues.Branches;
-		if (await this.repo.hasRemotes()) {
+		if ((await this.repo.git.getRemotes()).length) {
 			item.contextValue += '+remotes';
 		}
 		// TODO@axosoft-ramint Temporary workaround, remove when our git commands work on closed repos.

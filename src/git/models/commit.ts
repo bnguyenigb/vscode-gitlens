@@ -1,5 +1,5 @@
 import { Uri } from 'vscode';
-import type { EnrichedAutolink } from '../../annotations/autolinks';
+import type { EnrichedAutolink } from '../../autolinks';
 import { getAvatarUri, getCachedAvatarUri } from '../../avatars';
 import type { GravatarDefaultStyle } from '../../config';
 import { GlyphChars } from '../../constants';
@@ -209,7 +209,7 @@ export class GitCommit implements GitRevisionReference {
 			this._etagFileSystem = repository?.etagFileSystem;
 
 			if (this._etagFileSystem != null) {
-				const status = await this.container.git.getStatusForRepo(this.repoPath);
+				const status = await this.container.git.getStatus(this.repoPath);
 				if (status != null) {
 					this._files = status.files.flatMap(f => f.getPseudoFileChanges());
 				}
@@ -220,11 +220,13 @@ export class GitCommit implements GitRevisionReference {
 				this._files = this.file != null ? [this.file] : [];
 			}
 
+			this._recomputeStats = true;
+
 			return;
 		}
 
 		const [commitResult, untrackedResult] = await Promise.allSettled([
-			this.refType !== 'stash' ? this.container.git.getCommit(this.repoPath, this.sha) : undefined,
+			this.container.git.getCommit(this.repoPath, this.sha),
 			// Check for any untracked files -- since git doesn't return them via `git stash list` :(
 			// See https://stackoverflow.com/questions/12681529/
 			this.refType === 'stash' && !this._stashUntrackedFilesLoaded
@@ -419,13 +421,17 @@ export class GitCommit implements GitRevisionReference {
 		return status;
 	}
 
-	async getAssociatedPullRequest(remote?: GitRemote<RemoteProvider>): Promise<PullRequest | undefined> {
+	async getAssociatedPullRequest(
+		remote?: GitRemote<RemoteProvider>,
+		options?: { expiryOverride?: boolean | number },
+	): Promise<PullRequest | undefined> {
 		remote ??= await this.container.git.getBestRemoteWithIntegration(this.repoPath);
 		if (!remote?.hasIntegration()) return undefined;
 
 		return (await this.container.integrations.getByRemote(remote))?.getPullRequestForCommit(
 			remote.provider.repoDesc,
 			this.ref,
+			options,
 		);
 	}
 
@@ -557,6 +563,7 @@ export class GitCommit implements GitRevisionReference {
 		parents?: string[];
 		files?: { file?: GitFileChange | null; files?: GitFileChange[] | null } | null;
 		lines?: GitCommitLine[];
+		stats?: GitCommitStats;
 	}): GitCommit {
 		let files;
 		if (changes.files != null) {
@@ -587,7 +594,7 @@ export class GitCommit implements GitRevisionReference {
 			this.getChangedValue(changes.parents, this.parents) ?? [],
 			this.message,
 			files,
-			this.stats,
+			this.getChangedValue(changes.stats, this.stats),
 			this.getChangedValue(changes.lines, this.lines),
 			this.tips,
 			this.stashName,

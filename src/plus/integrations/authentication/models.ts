@@ -1,32 +1,69 @@
 import type { AuthenticationSession } from 'vscode';
-import { IssueIntegrationId } from '../providers/models';
+import type { IntegrationId, SupportedCloudIntegrationIds } from '../../../constants.integrations';
+import {
+	HostingIntegrationId,
+	IssueIntegrationId,
+	SelfHostedIntegrationId,
+	supportedCloudIntegrationIds,
+	supportedCloudIntegrationIdsExperimental,
+} from '../../../constants.integrations';
+import { configuration } from '../../../system/vscode/configuration';
 
 export interface ProviderAuthenticationSession extends AuthenticationSession {
+	readonly cloud: boolean;
 	readonly expiresAt?: Date;
 }
 
-export type CloudIntegrationTokenData = {
+export interface CloudIntegrationAuthenticationSession {
+	type: CloudIntegrationAuthType;
 	accessToken: string;
-	type: CloudIntegrationConnectionType;
 	domain: string;
 	expiresIn: number;
 	scopes: string;
-};
+}
 
-export type CloudIntegrationAuthorizationData = {
+export interface CloudIntegrationAuthorization {
 	url: string;
-};
+}
 
-export type ConnectedCloudIntegrationData = {
-	type: CloudIntegrationConnectionType;
+export interface CloudIntegrationConnection {
+	type: CloudIntegrationAuthType;
 	provider: CloudIntegrationType;
 	domain: string;
-};
+}
 
 export type CloudIntegrationType = 'jira' | 'trello' | 'gitlab' | 'github' | 'bitbucket' | 'azure';
 
-export type CloudIntegrationConnectionType = 'oauth' | 'personal_access_token';
+export type CloudIntegrationAuthType = 'oauth' | 'pat';
 
 export const CloudIntegrationAuthenticationUriPathPrefix = 'did-authenticate-cloud-integration';
 
-export const supportedCloudIntegrationIds = [IssueIntegrationId.Jira];
+export function getSupportedCloudIntegrationIds(): SupportedCloudIntegrationIds[] {
+	return configuration.get('cloudIntegrations.enabled', undefined, true)
+		? supportedCloudIntegrationIdsExperimental
+		: supportedCloudIntegrationIds;
+}
+
+export function isSupportedCloudIntegrationId(id: string): id is SupportedCloudIntegrationIds {
+	return getSupportedCloudIntegrationIds().includes(id as SupportedCloudIntegrationIds);
+}
+
+export const toIntegrationId: { [key in CloudIntegrationType]: IntegrationId } = {
+	jira: IssueIntegrationId.Jira,
+	trello: IssueIntegrationId.Trello,
+	gitlab: HostingIntegrationId.GitLab,
+	github: HostingIntegrationId.GitHub,
+	bitbucket: HostingIntegrationId.Bitbucket,
+	azure: HostingIntegrationId.AzureDevOps,
+};
+
+export const toCloudIntegrationType: { [key in IntegrationId]: CloudIntegrationType | undefined } = {
+	[IssueIntegrationId.Jira]: 'jira',
+	[IssueIntegrationId.Trello]: 'trello',
+	[HostingIntegrationId.GitLab]: 'gitlab',
+	[HostingIntegrationId.GitHub]: 'github',
+	[HostingIntegrationId.Bitbucket]: 'bitbucket',
+	[HostingIntegrationId.AzureDevOps]: 'azure',
+	[SelfHostedIntegrationId.GitHubEnterprise]: undefined,
+	[SelfHostedIntegrationId.GitLabSelfHosted]: undefined,
+};

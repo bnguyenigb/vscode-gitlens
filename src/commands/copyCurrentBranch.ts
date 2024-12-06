@@ -1,12 +1,12 @@
 import type { TextEditor, Uri } from 'vscode';
 import { env } from 'vscode';
-import { Commands } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { GitUri } from '../git/gitUri';
 import { showGenericErrorMessage } from '../messages';
 import { getBestRepositoryOrShowPicker } from '../quickpicks/repositoryPicker';
-import { command } from '../system/command';
 import { Logger } from '../system/logger';
+import { command } from '../system/vscode/command';
 import { ActiveEditorCommand, getCommandUri } from './base';
 
 @command()
@@ -24,7 +24,7 @@ export class CopyCurrentBranchCommand extends ActiveEditorCommand {
 		if (repository == null) return;
 
 		try {
-			const branch = await repository.getBranch();
+			const branch = await repository.git.getBranch();
 			if (branch?.name) {
 				await env.clipboard.writeText(branch.name);
 			}

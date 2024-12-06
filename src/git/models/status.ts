@@ -3,7 +3,7 @@ import { GlyphChars } from '../../constants';
 import { Container } from '../../container';
 import { memoize } from '../../system/decorators/memoize';
 import { pluralize } from '../../system/string';
-import type { GitTrackingState } from './branch';
+import type { GitBranchStatus, GitTrackingState } from './branch';
 import { formatDetachedHeadName, getRemoteNameFromBranchName, isDetachedHead } from './branch';
 import { GitCommit, GitCommitIdentity } from './commit';
 import { uncommitted, uncommittedStaged } from './constants';
@@ -52,9 +52,14 @@ export class GitStatus {
 		}
 	}
 
-	@memoize()
-	get conflicts() {
-		return this.files.filter(f => f.conflicted);
+	get branchStatus(): GitBranchStatus {
+		if (this.upstream == null) return this.detached ? 'detached' : 'local';
+
+		if (this.upstream.missing) return 'missingUpstream';
+		if (this.state.ahead && this.state.behind) return 'diverged';
+		if (this.state.ahead) return 'ahead';
+		if (this.state.behind) return 'behind';
+		return 'upToDate';
 	}
 
 	get hasChanges() {
@@ -64,6 +69,31 @@ export class GitStatus {
 	@memoize()
 	get hasConflicts() {
 		return this.files.some(f => f.conflicted);
+	}
+
+	@memoize()
+	get conflicts() {
+		return this.files.filter(f => f.conflicted);
+	}
+
+	@memoize()
+	get hasUntrackedChanges() {
+		return this.files.some(f => f.workingTreeStatus === GitFileWorkingTreeStatus.Untracked);
+	}
+
+	@memoize()
+	get untrackedChanges() {
+		return this.files.filter(f => f.workingTreeStatus === GitFileWorkingTreeStatus.Untracked);
+	}
+
+	@memoize()
+	get hasWorkingTreeChanges() {
+		return this.files.some(f => f.workingTreeStatus != null);
+	}
+
+	@memoize()
+	get workingTreeChanges() {
+		return this.files.filter(f => f.workingTreeStatus != null);
 	}
 
 	get ref() {
@@ -472,7 +502,7 @@ export class GitStatusFile implements GitFile {
 			const file = new GitFileChange(
 				this.repoPath,
 				this.path,
-				this.status,
+				this.workingTreeStatus ?? this.status,
 				this.originalPath,
 				previousSha,
 				undefined,
@@ -502,7 +532,7 @@ export class GitStatusFile implements GitFile {
 			const file = new GitFileChange(
 				this.repoPath,
 				this.path,
-				this.status,
+				this.indexStatus ?? this.status,
 				this.originalPath,
 				'HEAD',
 				undefined,

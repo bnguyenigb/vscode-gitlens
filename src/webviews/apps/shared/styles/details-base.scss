@@ -1,12 +1,14 @@
+@use '../../shared/styles/utils';
 @use './theme';
+@use './scrollbars';
 
 :root {
 	--gitlens-gutter-width: 20px;
 	--gitlens-scrollbar-gutter-width: 10px;
+	--gitlens-tree-foreground: var(--vscode-sideBar-foreground, var(--vscode-foreground));
 }
 
-.vscode-high-contrast,
-.vscode-dark {
+@include utils.dark-theme() {
 	--color-background--level-05: var(--color-background--lighten-05);
 	--color-background--level-075: var(--color-background--lighten-075);
 	--color-background--level-10: var(--color-background--lighten-10);
@@ -14,8 +16,7 @@
 	--color-background--level-30: var(--color-background--lighten-30);
 }
 
-.vscode-high-contrast-light,
-.vscode-light {
+@include utils.light-theme() {
 	--color-background--level-05: var(--color-background--darken-05);
 	--color-background--level-075: var(--color-background--darken-075);
 	--color-background--level-10: var(--color-background--darken-10);
@@ -44,49 +45,9 @@ body {
 	font-size: var(--font-size);
 	color: var(--color-foreground);
 	padding: 0;
-
-	&.scrollable,
-	.scrollable {
-		border-color: transparent;
-		transition: border-color 1s linear;
-
-		&:hover,
-		&:focus-within {
-			&.scrollable,
-			.scrollable {
-				border-color: var(--vscode-scrollbarSlider-background);
-				transition: none;
-			}
-		}
-	}
-
-	&.preload {
-		&.scrollable,
-		.scrollable {
-			transition: none;
-		}
-	}
 }
 
-::-webkit-scrollbar-corner {
-	background-color: transparent !important;
-}
-
-::-webkit-scrollbar-thumb {
-	background-color: transparent;
-	border-color: inherit;
-	border-right-style: inset;
-	border-right-width: calc(100vw + 100vh);
-	border-radius: unset !important;
-
-	&:hover {
-		border-color: var(--vscode-scrollbarSlider-hoverBackground);
-	}
-
-	&:active {
-		border-color: var(--vscode-scrollbarSlider-activeBackground);
-	}
-}
+@include scrollbars.scrollableBase();
 
 a {
 	text-decoration: none;
@@ -110,10 +71,6 @@ ul {
 }
 
 .button--busy {
-	code-icon {
-		margin-right: 0.5rem;
-	}
-
 	&[aria-busy='true'] {
 		opacity: 0.5;
 	}
@@ -145,6 +102,18 @@ ul {
 	&--single {
 		width: 100%;
 		max-width: 30rem;
+	}
+
+	> *:not(:first-child),
+	> *:not(:first-child) gl-button {
+		border-top-left-radius: 0;
+		border-bottom-left-radius: 0;
+	}
+
+	> *:not(:last-child),
+	> *:not(:last-child) gl-button {
+		border-top-right-radius: 0;
+		border-bottom-right-radius: 0;
 	}
 }
 
@@ -233,10 +202,5 @@ ul {
 		overflow-x: hidden;
 		resize: vertical;
 		max-height: 20rem;
-		white-space: break-spaces;
-
-		.has-error & {
-			white-space: normal;
-		}
 	}
 }

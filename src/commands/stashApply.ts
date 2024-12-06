@@ -1,10 +1,10 @@
-import { Commands } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { apply, pop } from '../git/actions/stash';
 import type { GitStashCommit } from '../git/models/commit';
 import type { GitStashReference } from '../git/models/reference';
 import type { CommandQuickPickItem } from '../quickpicks/items/common';
-import { command } from '../system/command';
+import { command } from '../system/vscode/command';
 import type { CommandContext } from './base';
 import { Command, isCommandContextViewNodeHasCommit, isCommandContextViewNodeHasRepository } from './base';
 

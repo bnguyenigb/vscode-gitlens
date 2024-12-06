@@ -86,7 +86,6 @@ export function debounce<T extends (...args: any[]) => ReturnType<T>>(
 
 	function debounced(this: any, ...args: Parameters<T>) {
 		const time = Date.now();
-		const isInvoking = shouldInvoke(time);
 
 		if (aggregator != null && lastArgs) {
 			lastArgs = aggregator(lastArgs, args);
@@ -98,13 +97,6 @@ export function debounce<T extends (...args: any[]) => ReturnType<T>>(
 		lastThis = this;
 		lastCallTime = time;
 
-		if (isInvoking) {
-			if (timer == null) {
-				// Start the timer for the trailing edge.
-				timer = setTimeout(timerExpired, wait);
-				return result;
-			}
-		}
 		if (timer == null) {
 			timer = setTimeout(timerExpired, wait);
 		}
@@ -128,6 +120,7 @@ const fnBodyRegex = /\(([\s\S]*)\)/;
 const fnBodyStripCommentsRegex = /(\/\*([\s\S]*?)\*\/|([^:]|^)\/\/(.*)$)/gm;
 const fnBodyStripParamDefaultValueRegex = /\s?=.*$/;
 
+// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
 export function getParameters(fn: Function): string[] {
 	if (typeof fn !== 'function') throw new Error('Not supported');
 
@@ -175,6 +168,23 @@ export function once<T extends (...args: any[]) => any>(fn: T): T {
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-return
 		return result;
 	} as T;
+}
+
+type PartialArgs<T extends any[], P extends any[]> = {
+	[K in keyof P]: K extends keyof T ? T[K] : never;
+};
+
+type DropFirstN<T extends any[], N extends number, I extends any[] = []> = {
+	0: T;
+	1: T extends [infer _, ...infer R] ? DropFirstN<R, N, [any, ...I]> : T;
+}[I['length'] extends N ? 0 : 1];
+
+export function partial<T extends (...args: any[]) => any, P extends any[]>(
+	fn: T,
+	...partialArgs: PartialArgs<Parameters<T>, P>
+): (...rest: DropFirstN<Parameters<T>, P['length']>) => ReturnType<T> {
+	// eslint-disable-next-line @typescript-eslint/no-unsafe-return
+	return (...rest) => fn(...partialArgs, ...rest);
 }
 
 export function propOf<T, K extends Extract<keyof T, string>>(o: T, key: K) {
@@ -246,3 +256,6 @@ export function throttle<T extends (...args: any[]) => ReturnType<T>>(fn: T, del
 		}, delay);
 	};
 }
+
+//** Used to cause compile errors for exhaustive type checking */
+export function typeCheck<T>(value: T): asserts value is T {}

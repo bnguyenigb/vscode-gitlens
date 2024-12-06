@@ -1,8 +1,8 @@
 import type { Uri } from 'vscode';
 import { Disposable, ViewColumn } from 'vscode';
-import { Commands } from '../../../constants';
-import { registerCommand } from '../../../system/command';
-import { configuration } from '../../../system/configuration';
+import { Commands } from '../../../constants.commands';
+import { registerCommand } from '../../../system/vscode/command';
+import { configuration } from '../../../system/vscode/configuration';
 import type { ViewFileNode } from '../../../views/nodes/abstract/viewFileNode';
 import type { WebviewPanelsProxy, WebviewsController } from '../../../webviews/webviewsController';
 import type { State } from './protocol';
@@ -19,6 +19,7 @@ export function registerTimelineWebviewPanel(controller: WebviewsController) {
 			title: 'Visual File History',
 			contextKeyPrefix: `gitlens:webview:timeline`,
 			trackingFeature: 'timelineWebview',
+			type: 'timeline',
 			plusFeature: true,
 			column: ViewColumn.Active,
 			webviewHostOptions: {
@@ -44,6 +45,7 @@ export function registerTimelineWebviewView(controller: WebviewsController) {
 			title: 'Visual File History',
 			contextKeyPrefix: `gitlens:webviewView:timeline`,
 			trackingFeature: 'timelineView',
+			type: 'timeline',
 			plusFeature: true,
 			webviewHostOptions: {
 				retainContextWhenHidden: false,

@@ -1,9 +1,16 @@
 import { css, html, LitElement, nothing } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { customElement, property, query } from 'lit/decorators.js';
+import { focusOutline } from '../styles/lit/a11y.css';
+import '../overlays/tooltip';
 import '../code-icon';
 
 @customElement('action-item')
 export class ActionItem extends LitElement {
+	static override shadowRootOptions: ShadowRootInit = {
+		...LitElement.shadowRootOptions,
+		delegatesFocus: true,
+	};
+
 	static override styles = css`
 		:host {
 			box-sizing: border-box;
@@ -20,9 +27,8 @@ export class ActionItem extends LitElement {
 			cursor: pointer;
 		}
 
-		:host(:focus) {
-			outline: 1px solid var(--vscode-focusBorder);
-			outline-offset: -1px;
+		:host(:focus-within) {
+			${focusOutline}
 		}
 
 		:host(:hover) {
@@ -37,13 +43,20 @@ export class ActionItem extends LitElement {
 			pointer-events: none;
 			opacity: 0.5;
 		}
+
+		a {
+			color: inherit;
+		}
+		a:focus {
+			outline: none;
+		}
 	`;
 
 	@property()
 	href?: string;
 
 	@property()
-	label = '';
+	label?: string;
 
 	@property()
 	icon = '';
@@ -51,17 +64,26 @@ export class ActionItem extends LitElement {
 	@property({ type: Boolean })
 	disabled = false;
 
+	@query('a')
+	private defaultFocusEl!: HTMLAnchorElement;
+
 	override render() {
 		return html`
-			<a
-				role="${!this.href ? 'button' : nothing}"
-				type="${!this.href ? 'button' : nothing}"
-				aria-label="${this.label}"
-				title="${this.label}"
-				?disabled=${this.disabled}
-			>
-				<code-icon icon="${this.icon}"></code-icon>
-			</a>
+			<gl-tooltip hoist content="${this.label ?? nothing}">
+				<a
+					role="${!this.href ? 'button' : nothing}"
+					type="${!this.href ? 'button' : nothing}"
+					aria-label="${this.label ?? nothing}"
+					?disabled=${this.disabled}
+					href=${this.href ?? nothing}
+				>
+					<code-icon icon="${this.icon}"></code-icon>
+				</a>
+			</gl-tooltip>
 		`;
+	}
+
+	override focus(options?: FocusOptions) {
+		this.defaultFocusEl.focus(options);
 	}
 }

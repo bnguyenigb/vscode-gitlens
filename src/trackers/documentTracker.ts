@@ -16,13 +16,16 @@ import type { GitUri } from '../git/gitUri';
 import { isGitUri } from '../git/gitUri';
 import type { RepositoryChangeEvent } from '../git/models/repository';
 import { RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
-import { configuration } from '../system/configuration';
-import { setContext } from '../system/context';
+import { debug } from '../system/decorators/log';
 import { once } from '../system/event';
 import type { Deferrable } from '../system/function';
 import { debounce } from '../system/function';
-import { findTextDocument, isActiveDocument, isTextEditor } from '../system/utils';
-import { TrackedGitDocument } from './trackedDocument';
+import { configuration } from '../system/vscode/configuration';
+import { setContext } from '../system/vscode/context';
+import { UriSet } from '../system/vscode/uriMap';
+import { findTextDocument, isVisibleDocument } from '../system/vscode/utils';
+import type { TrackedGitDocument } from './trackedDocument';
+import { createTrackedGitDocument } from './trackedDocument';
 
 export interface DocumentContentChangeEvent {
 	readonly editor: TextEditor;
@@ -31,7 +34,7 @@ export interface DocumentContentChangeEvent {
 }
 
 export interface DocumentBlameStateChangeEvent {
-	readonly editor: TextEditor;
+	readonly editor: TextEditor | undefined;
 	readonly document: TrackedGitDocument;
 	readonly blameable: boolean;
 }
@@ -79,6 +82,8 @@ export class GitDocumentTracker implements Disposable {
 			once(container.onReady)(this.onReady, this),
 			configuration.onDidChange(this.onConfigurationChanged, this),
 			window.onDidChangeActiveTextEditor(this.onActiveTextEditorChanged, this),
+			window.onDidChangeVisibleTextEditors(this.onVisibleTextEditorsChanged, this),
+			workspace.onDidOpenTextDocument(this.onTextDocumentOpened, this),
 			workspace.onDidChangeTextDocument(this.onTextDocumentChanged, this),
 			workspace.onDidCloseTextDocument(this.onTextDocumentClosed, this),
 			workspace.onDidSaveTextDocument(this.onTextDocumentSaved, this),
@@ -97,13 +102,31 @@ export class GitDocumentTracker implements Disposable {
 
 	private onReady(): void {
 		this.onConfigurationChanged();
-		this.onActiveTextEditorChanged(window.activeTextEditor);
+
+		const activeDocument = window.activeTextEditor?.document;
+
+		const docs = workspace.textDocuments
+			.filter(d => this.container.git.supportedSchemes.has(d.uri.scheme))
+			.map<[TextDocument, visible: boolean, active: boolean]>(d => [
+				d,
+				isVisibleDocument(d),
+				activeDocument === d,
+			]);
+
+		// Sort by active and then by visible
+		docs.sort(([, aVisible, aActive], [, bVisible, bActive]) => {
+			if (aActive === bActive) {
+				return aVisible === bVisible ? 0 : aVisible ? -1 : 1;
+			}
+			return aActive ? -1 : 1;
+		});
+
+		for (const [doc, visible, active] of docs) {
+			this.onTextDocumentOpened(doc, visible || active);
+		}
 	}
 
-	private _timer: ReturnType<typeof setTimeout> | undefined;
-	private onActiveTextEditorChanged(editor: TextEditor | undefined) {
-		if (editor != null && !isTextEditor(editor)) return;
-
+	private onActiveTextEditorChanged(_editor: TextEditor | undefined) {
 		this._dirtyIdleTriggeredDebounced?.flush();
 		this._dirtyIdleTriggeredDebounced?.cancel();
 		this._dirtyIdleTriggeredDebounced = undefined;
@@ -111,34 +134,6 @@ export class GitDocumentTracker implements Disposable {
 		this._dirtyStateChangedDebounced?.flush();
 		this._dirtyStateChangedDebounced?.cancel();
 		this._dirtyStateChangedDebounced = undefined;
-
-		if (this._timer != null) {
-			clearTimeout(this._timer);
-			this._timer = undefined;
-		}
-
-		if (editor == null) {
-			this._timer = setTimeout(() => {
-				this._timer = undefined;
-
-				void setContext('gitlens:activeFileStatus', undefined);
-			}, 250);
-
-			return;
-		}
-
-		const doc = this._documentMap.get(editor.document);
-		if (doc != null) {
-			void doc.then(
-				d => d.activate(),
-				() => {},
-			);
-
-			return;
-		}
-
-		// No need to activate this, as it is implicit in initialization if currently active
-		void this.addCore(editor.document);
 	}
 
 	private onConfigurationChanged(e?: ConfigurationChangeEvent) {
@@ -181,14 +176,20 @@ export class GitDocumentTracker implements Disposable {
 		}
 	}
 
+	private onTextDocumentOpened(document: TextDocument, visible?: boolean) {
+		if (!this.container.git.supportedSchemes.has(document.uri.scheme)) return;
+
+		void this.addCore(document, visible);
+	}
+
 	private debouncedTextDocumentChanges = new WeakMap<
 		TextDocument,
 		Deferrable<Parameters<typeof workspace.onDidChangeTextDocument>[0]>
 	>();
 
 	private onTextDocumentChanged(e: TextDocumentChangeEvent) {
-		const { scheme } = e.document.uri;
-		if (!this.container.git.supportedSchemes.has(scheme)) return;
+		if (!this.container.git.supportedSchemes.has(e.document.uri.scheme)) return;
+		if (!this._documentMap.has(e.document)) return;
 
 		let debouncedChange = this.debouncedTextDocumentChanges.get(e.document);
 		if (debouncedChange == null) {
@@ -214,8 +215,11 @@ export class GitDocumentTracker implements Disposable {
 	private async onTextDocumentChangedCore(e: TextDocumentChangeEvent) {
 		this.debouncedTextDocumentChanges.delete(e.document);
 
-		const doc = await (this._documentMap.get(e.document) ?? this.addCore(e.document));
-		doc.refresh('doc-changed');
+		const docPromise = this._documentMap.get(e.document);
+		if (docPromise == null) return;
+
+		const doc = await docPromise;
+		doc.refresh('changed');
 
 		const dirty = e.document.isDirty;
 		const editor = window.activeTextEditor;
@@ -250,27 +254,27 @@ export class GitDocumentTracker implements Disposable {
 	}
 
 	private async onTextDocumentSaved(document: TextDocument) {
-		const doc = this._documentMap.get(document);
-		if (doc != null) {
-			void (await doc).update({ forceBlameChange: true });
+		const docPromise = this._documentMap.get(document);
+		if (docPromise == null) return;
 
-			return;
-		}
-
-		// If we are saving the active document make sure we are tracking it
-		if (isActiveDocument(document)) {
-			void this.addCore(document);
-		}
+		const doc = await docPromise;
+		doc.refresh('saved');
 	}
 
-	// private onVisibleEditorsChanged(editors: TextEditor[]) {
-	//     if (this._documentMap.size === 0) return;
+	private onVisibleTextEditorsChanged(editors: readonly TextEditor[]) {
+		const docPromises = [];
+		for (const editor of editors) {
+			const document = editor.document;
+			if (!this.container.git.supportedSchemes.has(document.uri.scheme)) continue;
 
-	//     // If we have no visible editors, or no "real" visible editors reset our cache
-	//     if (editors.length === 0 || editors.every(e => !isTextEditor(e))) {
-	//         this.clear();
-	//     }
-	// }
+			const docPromise = this._documentMap.get(document);
+			if (docPromise == null) continue;
+
+			docPromises.push(docPromise.then(doc => doc?.refresh('visible')));
+		}
+
+		void Promise.allSettled(docPromises);
+	}
 
 	add(document: TextDocument): Promise<TrackedGitDocument>;
 	add(uri: Uri): Promise<TrackedGitDocument>;
@@ -317,15 +321,16 @@ export class GitDocumentTracker implements Disposable {
 		return doc;
 	}
 
-	private async addCore(document: TextDocument): Promise<TrackedGitDocument> {
-		const doc = TrackedGitDocument.create(
+	@debug()
+	private async addCore(document: TextDocument, visible?: boolean): Promise<TrackedGitDocument> {
+		const doc = createTrackedGitDocument(
+			this.container,
+			this,
 			document,
+			(e: DocumentBlameStateChangeEvent) => this._onDidChangeBlameState.fire(e),
+			visible ?? isVisibleDocument(document),
 			// Always start out false, so we will fire the event if needed
 			false,
-			{
-				onDidBlameStateChange: (e: DocumentBlameStateChangeEvent) => this._onDidChangeBlameState.fire(e),
-			},
-			this.container,
 		);
 
 		this._documentMap.set(document, doc);
@@ -333,6 +338,7 @@ export class GitDocumentTracker implements Disposable {
 		return doc;
 	}
 
+	@debug()
 	async clear() {
 		for (const d of this._documentMap.values()) {
 			(await d).dispose();
@@ -344,6 +350,7 @@ export class GitDocumentTracker implements Disposable {
 	get(document: TextDocument): Promise<TrackedGitDocument> | undefined;
 	get(uri: Uri): Promise<TrackedGitDocument> | undefined;
 	get(documentOrUri: TextDocument | Uri): Promise<TrackedGitDocument> | undefined;
+	@debug()
 	get(documentOrUri: TextDocument | Uri): Promise<TrackedGitDocument> | undefined {
 		if (documentOrUri instanceof Uri) {
 			const document = findTextDocument(documentOrUri);
@@ -357,10 +364,6 @@ export class GitDocumentTracker implements Disposable {
 	}
 
 	async getOrAdd(documentOrUri: TextDocument | Uri): Promise<TrackedGitDocument> {
-		if (documentOrUri instanceof Uri) {
-			documentOrUri = findTextDocument(documentOrUri) ?? documentOrUri;
-		}
-
 		const doc = this.get(documentOrUri) ?? this.add(documentOrUri);
 		return doc;
 	}
@@ -380,6 +383,7 @@ export class GitDocumentTracker implements Disposable {
 
 	resetCache(document: TextDocument, affects: 'blame' | 'diff' | 'log'): Promise<void>;
 	resetCache(uri: Uri, affects: 'blame' | 'diff' | 'log'): Promise<void>;
+	@debug()
 	async resetCache(documentOrUri: TextDocument | Uri, affects: 'blame' | 'diff' | 'log'): Promise<void> {
 		const doc = this.get(documentOrUri);
 		if (doc == null) return;
@@ -397,6 +401,7 @@ export class GitDocumentTracker implements Disposable {
 		}
 	}
 
+	@debug({ args: { 1: false } })
 	private async remove(document: TextDocument, tracked?: TrackedGitDocument): Promise<void> {
 		let docPromise;
 		if (tracked != null) {
@@ -405,7 +410,50 @@ export class GitDocumentTracker implements Disposable {
 
 		this._documentMap.delete(document);
 
+		this.updateContext(document.uri, false, false);
+
 		(tracked ?? (await docPromise))?.dispose();
+	}
+
+	private readonly _openUrisBlameable = new UriSet();
+	private readonly _openUrisTracked = new UriSet();
+	private _updateContextDebounced: Deferrable<() => void> | undefined;
+
+	updateContext(uri: Uri, blameable: boolean, tracked: boolean) {
+		let changed = false;
+
+		function updateContextCore(this: GitDocumentTracker, uri: Uri, blameable: boolean, tracked: boolean) {
+			if (tracked) {
+				if (!this._openUrisTracked.has(uri)) {
+					changed = true;
+					this._openUrisTracked.add(uri);
+				}
+			} else if (this._openUrisTracked.has(uri)) {
+				changed = true;
+				this._openUrisTracked.delete(uri);
+			}
+
+			if (blameable) {
+				if (!this._openUrisBlameable.has(uri)) {
+					changed = true;
+
+					this._openUrisBlameable.add(uri);
+				}
+			} else if (this._openUrisBlameable.has(uri)) {
+				changed = true;
+				this._openUrisBlameable.delete(uri);
+			}
+
+			if (!changed) return;
+
+			this._updateContextDebounced ??= debounce(() => {
+				void setContext('gitlens:tabs:tracked', [...this._openUrisTracked]);
+				void setContext('gitlens:tabs:blameable', [...this._openUrisBlameable]);
+			}, 100);
+			this._updateContextDebounced();
+		}
+
+		updateContextCore.call(this, uri, blameable, tracked);
 	}
 
 	private fireDocumentDirtyStateChanged(e: DocumentDirtyStateChangeEvent) {
@@ -421,7 +469,7 @@ export class GitDocumentTracker implements Disposable {
 				this._dirtyIdleTriggeredDebounced ??= debounce((e: DocumentDirtyIdleTriggerEvent) => {
 					if (this._dirtyIdleTriggeredDebounced?.pending()) return;
 
-					if (e.document.setIsDirtyIdle()) {
+					if (e.document.setDirtyIdle()) {
 						this._onDidTriggerDirtyIdle.fire(e);
 					}
 				}, this._dirtyIdleTriggerDelay);
@@ -447,14 +495,15 @@ export class GitDocumentTracker implements Disposable {
 	}) {
 		if (this._documentMap.size === 0) return;
 
-		for await (const doc of this._documentMap.values()) {
+		for (const d of this._documentMap.values()) {
+			const doc = await d;
 			const repoPath = doc.uri.repoPath?.toLocaleLowerCase();
 			if (repoPath == null) continue;
 
 			if (changed?.removedRepoPaths?.has(repoPath)) {
 				void this.remove(doc.document, doc);
 			} else if (changed == null || changed?.addedOrChangedRepoPaths?.has(repoPath)) {
-				doc.refresh('repo-changed');
+				doc.refresh('repositoryChanged');
 			}
 		}
 	}

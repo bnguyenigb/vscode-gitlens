@@ -1,83 +1,83 @@
-import type { QuickPickItem } from 'vscode';
-import { QuickPickItemKind, window } from 'vscode';
-import type { AIModels, AIProviders } from '../constants';
-import { configuration } from '../system/configuration';
+import type { Disposable, QuickInputButton, QuickPickItem } from 'vscode';
+import { QuickPickItemKind, ThemeIcon, window } from 'vscode';
+import type { AIModel } from '../ai/aiProviderService';
+import type { AIModels, AIProviders } from '../constants.ai';
+import { Commands } from '../constants.commands';
+import type { Container } from '../container';
+import { executeCommand } from '../system/vscode/command';
+import { getQuickPickIgnoreFocusOut } from '../system/vscode/utils';
 
-export interface ModelQuickPickItem<
-	Provider extends AIProviders = AIProviders,
-	Model extends AIModels<Provider> = AIModels<Provider>,
-> extends QuickPickItem {
-	provider: Provider;
-	model: Model;
+export interface ModelQuickPickItem extends QuickPickItem {
+	model: AIModel;
 }
 
-export async function showAIModelPicker(): Promise<ModelQuickPickItem | undefined>;
-export async function showAIModelPicker<T extends AIProviders>(provider: T): Promise<ModelQuickPickItem<T> | undefined>;
-export async function showAIModelPicker(provider?: AIProviders): Promise<ModelQuickPickItem | undefined> {
-	type QuickPickSeparator = { label: string; kind: QuickPickItemKind.Separator };
+export async function showAIModelPicker(
+	container: Container,
+	current?: { provider: AIProviders; model: AIModels },
+): Promise<ModelQuickPickItem | undefined> {
+	const models = (await (await container.ai)?.getModels()) ?? [];
 
-	let items: (ModelQuickPickItem | QuickPickSeparator)[] = [
-		{ label: 'OpenAI', kind: QuickPickItemKind.Separator },
-		{ label: 'OpenAI', description: 'GPT-4 Turbo with Vision', provider: 'openai', model: 'gpt-4-turbo' },
-		{ label: 'OpenAI', description: 'GPT-4 Turbo Preview', provider: 'openai', model: 'gpt-4-turbo-preview' },
-		{ label: 'OpenAI', description: 'GPT-4', provider: 'openai', model: 'gpt-4' },
-		{ label: 'OpenAI', description: 'GPT-4 32k', provider: 'openai', model: 'gpt-4-32k' },
-		{ label: 'OpenAI', description: 'GPT-3.5 Turbo', provider: 'openai', model: 'gpt-3.5-turbo' },
+	const items: ModelQuickPickItem[] = [];
 
-		{ label: 'Anthropic', kind: QuickPickItemKind.Separator },
-		{ label: 'Anthropic', description: 'Claude 3 Opus', provider: 'anthropic', model: 'claude-3-opus-20240229' },
-		{
-			label: 'Anthropic',
-			description: 'Claude 3 Sonnet',
-			provider: 'anthropic',
-			model: 'claude-3-sonnet-20240229',
-		},
-		{ label: 'Anthropic', description: 'Claude 3 Haiku', provider: 'anthropic', model: 'claude-3-haiku-20240307' },
-		{ label: 'Anthropic', description: 'Claude 2.1', provider: 'anthropic', model: 'claude-2.1' },
-		{ label: 'Anthropic', description: 'Claude 2.0', provider: 'anthropic', model: 'claude-2' },
-		{ label: 'Anthropic', description: 'Claude Instant', provider: 'anthropic', model: 'claude-instant-1' },
+	let lastProvider: AIProviders | undefined;
+	for (const m of models) {
+		if (m.hidden) continue;
 
-		{ label: 'Gemini', kind: QuickPickItemKind.Separator },
-		{ label: 'Gemini', description: 'Gemini 1.5 Pro', provider: 'gemini', model: 'gemini-1.5-pro-latest' },
-		{ label: 'Gemini', description: 'Gemini 1.0 Pro', provider: 'gemini', model: 'gemini-1.0-pro' },
-	];
-
-	if (provider != null) {
-		items = items.filter(i => i.kind !== QuickPickItemKind.Separator && i.provider === provider);
-	} else {
-		provider = configuration.get('ai.experimental.provider') ?? 'openai';
-	}
-
-	let model = configuration.get(`ai.experimental.${provider}.model`);
-	if (model == null) {
-		switch (provider) {
-			case 'anthropic':
-				model = 'claude-3-haiku-20240307';
-				break;
-			case 'gemini':
-				model = 'gemini-1.5-pro-latest';
-				break;
-			case 'openai':
-				model = 'gpt-4-turbo-preview';
-				break;
+		if (lastProvider !== m.provider.id) {
+			lastProvider = m.provider.id;
+			items.push({ label: m.provider.name, kind: QuickPickItemKind.Separator } as unknown as ModelQuickPickItem);
 		}
+
+		const picked = m.provider.id === current?.provider && m.id === current?.model;
+
+		items.push({
+			label: m.name,
+			iconPath: picked ? new ThemeIcon('check') : new ThemeIcon('blank'),
+			// description: ` ~${formatNumeric(m.maxTokens)} tokens`,
+			model: m,
+			picked: picked,
+		} satisfies ModelQuickPickItem);
 	}
 
-	for (const item of items) {
-		if (item.kind === QuickPickItemKind.Separator) continue;
+	const quickpick = window.createQuickPick<ModelQuickPickItem>();
+	quickpick.ignoreFocusOut = getQuickPickIgnoreFocusOut();
 
-		if (item.model === model) {
-			item.description = `${item.description}  \u2713`;
-			item.picked = true;
-			break;
-		}
+	const disposables: Disposable[] = [];
+
+	const ResetAIKeyButton: QuickInputButton = {
+		iconPath: new ThemeIcon('clear-all'),
+		tooltip: 'Reset AI Keys...',
+	};
+
+	try {
+		const pick = await new Promise<ModelQuickPickItem | undefined>(resolve => {
+			disposables.push(
+				quickpick.onDidHide(() => resolve(undefined)),
+				quickpick.onDidAccept(() => {
+					if (quickpick.activeItems.length !== 0) {
+						resolve(quickpick.activeItems[0]);
+					}
+				}),
+				quickpick.onDidTriggerButton(e => {
+					if (e === ResetAIKeyButton) {
+						void executeCommand(Commands.ResetAIKey);
+					}
+				}),
+			);
+
+			quickpick.title = 'Choose AI Model';
+			quickpick.placeholder = 'Select an AI model to use for experimental AI features';
+			quickpick.matchOnDescription = true;
+			quickpick.matchOnDetail = true;
+			quickpick.buttons = [ResetAIKeyButton];
+			quickpick.items = items;
+
+			quickpick.show();
+		});
+
+		return pick;
+	} finally {
+		quickpick.dispose();
+		disposables.forEach(d => void d.dispose());
 	}
-
-	const pick = (await window.showQuickPick(items, {
-		title: 'Switch AI Model',
-		placeHolder: 'select an AI model to use for experimental AI features',
-		matchOnDescription: true,
-	})) as ModelQuickPickItem | undefined;
-
-	return pick;
 }

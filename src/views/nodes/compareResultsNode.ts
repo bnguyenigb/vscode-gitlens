@@ -1,7 +1,7 @@
-import type { Disposable, TreeCheckboxChangeEvent } from 'vscode';
-import { ThemeIcon, TreeItem, TreeItemCheckboxState, TreeItemCollapsibleState, window } from 'vscode';
 import { md5 } from '@env/crypto';
-import type { StoredNamedRef } from '../../constants';
+import type { TreeCheckboxChangeEvent } from 'vscode';
+import { Disposable, ThemeIcon, TreeItem, TreeItemCheckboxState, TreeItemCollapsibleState, window } from 'vscode';
+import type { StoredNamedRef } from '../../constants.storage';
 import type { FilesComparison } from '../../git/actions/commit';
 import { GitUri } from '../../git/gitUri';
 import { createRevisionRange, shortenRevision } from '../../git/models/reference';
@@ -106,7 +106,18 @@ export class CompareResultsNode extends SubscribeableViewNode<
 	}
 
 	protected override subscribe(): Disposable | Promise<Disposable | undefined> | undefined {
-		return weakEvent(this.view.onDidChangeNodesCheckedState, this.onNodesCheckedStateChanged, this);
+		return Disposable.from(
+			weakEvent(this.view.onDidChangeNodesCheckedState, this.onNodesCheckedStateChanged, this),
+			weakEvent(
+				this.view.container.integrations.onDidChangeConnectionState,
+				this.onIntegrationConnectionStateChanged,
+				this,
+			),
+		);
+	}
+
+	private onIntegrationConnectionStateChanged() {
+		this.view.triggerNodeChange(this.parent);
 	}
 
 	private onNodesCheckedStateChanged(e: TreeCheckboxChangeEvent<ViewNode>) {
@@ -125,9 +136,9 @@ export class CompareResultsNode extends SubscribeableViewNode<
 			const ahead = this.ahead;
 			const behind = this.behind;
 
-			const aheadBehindCounts = await this.view.container.git.getAheadBehindCommitCount(
+			const counts = await this.view.container.git.getLeftRightCommitCount(
 				this.repoPath,
-				[createRevisionRange(behind.ref1 || 'HEAD', behind.ref2, '...')],
+				createRevisionRange(behind.ref1 || 'HEAD', behind.ref2, '...'),
 				{ authors: this.filterByAuthors },
 			);
 
@@ -153,7 +164,7 @@ export class CompareResultsNode extends SubscribeableViewNode<
 						},
 					},
 					{
-						description: pluralize('commit', aheadBehindCounts?.behind ?? 0),
+						description: pluralize('commit', counts?.right ?? 0),
 						expand: false,
 					},
 				),
@@ -173,7 +184,7 @@ export class CompareResultsNode extends SubscribeableViewNode<
 						},
 					},
 					{
-						description: pluralize('commit', aheadBehindCounts?.ahead ?? 0),
+						description: pluralize('commit', counts?.left ?? 0),
 						expand: false,
 					},
 				),
@@ -234,7 +245,7 @@ export class CompareResultsNode extends SubscribeableViewNode<
 
 	async getFilesComparison(): Promise<FilesComparison | undefined> {
 		const children = await this.getChildren();
-		const node = children.find(c => c.is('results-files')) as ResultsFilesNode | undefined;
+		const node = children.find(c => c.is('results-files'));
 		return node?.getFilesComparison();
 	}
 

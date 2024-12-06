@@ -11,10 +11,10 @@ import type { BranchSortOptions, GitBranch } from '../git/models/branch';
 import type { GitReference } from '../git/models/reference';
 import { isBranchReference, isRevisionReference, isTagReference } from '../git/models/reference';
 import type { GitTag, TagSortOptions } from '../git/models/tag';
-import type { KeyboardScope } from '../system/keyboard';
-import { getQuickPickIgnoreFocusOut } from '../system/utils';
-import type { BranchQuickPickItem, RefQuickPickItem, TagQuickPickItem } from './items/gitCommands';
-import { createRefQuickPickItem } from './items/gitCommands';
+import type { KeyboardScope } from '../system/vscode/keyboard';
+import { getQuickPickIgnoreFocusOut } from '../system/vscode/utils';
+import type { BranchQuickPickItem, RefQuickPickItem, TagQuickPickItem } from './items/gitWizard';
+import { createRefQuickPickItem } from './items/gitWizard';
 
 export type ReferencesQuickPickItem = BranchQuickPickItem | TagQuickPickItem | RefQuickPickItem;
 
@@ -24,9 +24,7 @@ export const enum ReferencesQuickPickIncludes {
 	WorkingTree = 1 << 2,
 	HEAD = 1 << 3,
 
-	// eslint-disable-next-line @typescript-eslint/prefer-literal-enum-member
 	BranchesAndTags = Branches | Tags,
-	// eslint-disable-next-line @typescript-eslint/prefer-literal-enum-member
 	All = Branches | Tags | WorkingTree | HEAD,
 }
 
@@ -46,7 +44,7 @@ export interface ReferencesQuickPickOptions {
 export async function showReferencePicker(
 	repoPath: string,
 	title: string,
-	placeHolder: string,
+	placeholder: string,
 	options?: ReferencesQuickPickOptions,
 ): Promise<GitReference | undefined> {
 	const quickpick = window.createQuickPick<ReferencesQuickPickItem>();
@@ -55,8 +53,8 @@ export async function showReferencePicker(
 	quickpick.title = title;
 	quickpick.placeholder =
 		options?.allowRevisions != null && options.allowRevisions !== false
-			? `${placeHolder} (or enter a revision using #)`
-			: placeHolder;
+			? `${placeholder} (or enter a revision using #)`
+			: placeholder;
 	quickpick.matchOnDescription = true;
 
 	const disposables: Disposable[] = [];

@@ -1,12 +1,12 @@
 import { Disposable, ViewColumn } from 'vscode';
 import { isScm } from '../../../commands/base';
-import { Commands } from '../../../constants';
+import { Commands } from '../../../constants.commands';
 import type { Container } from '../../../container';
 import type { GitReference } from '../../../git/models/reference';
 import type { Repository } from '../../../git/models/repository';
-import { executeCommand, executeCoreCommand, registerCommand } from '../../../system/command';
-import { configuration } from '../../../system/configuration';
-import { getContext } from '../../../system/context';
+import { executeCommand, executeCoreCommand, registerCommand } from '../../../system/vscode/command';
+import { configuration } from '../../../system/vscode/configuration';
+import { getContext } from '../../../system/vscode/context';
 import { ViewNode } from '../../../views/nodes/abstract/viewNode';
 import type { BranchNode } from '../../../views/nodes/branchNode';
 import type { CommitFileNode } from '../../../views/nodes/commitFileNode';
@@ -33,6 +33,7 @@ export function registerGraphWebviewPanel(controller: WebviewsController) {
 			title: 'Commit Graph',
 			contextKeyPrefix: `gitlens:webview:graph`,
 			trackingFeature: 'graphWebview',
+			type: 'graph',
 			plusFeature: true,
 			column: ViewColumn.Active,
 			webviewHostOptions: {
@@ -56,6 +57,7 @@ export function registerGraphWebviewView(controller: WebviewsController) {
 			title: 'Commit Graph',
 			contextKeyPrefix: `gitlens:webviewView:graph`,
 			trackingFeature: 'graphView',
+			type: 'graph',
 			plusFeature: true,
 			webviewHostOptions: {
 				retainContextWhenHidden: true,
@@ -150,7 +152,7 @@ export function registerGraphWebviewCommands<T>(
 
 				const preserveFocus = 'preserveFocus' in args ? args.preserveFocus ?? false : false;
 				if (configuration.get('graph.layout') === 'panel') {
-					if (!container.graphView.visible) {
+					if (!container.views.graph.visible) {
 						const instance = panels.getBestInstance({ preserveFocus: preserveFocus }, args);
 						if (instance != null) {
 							void instance.show({ preserveFocus: preserveFocus }, args);
@@ -158,7 +160,7 @@ export function registerGraphWebviewCommands<T>(
 						}
 					}
 
-					void container.graphView.show({ preserveFocus: preserveFocus }, args);
+					void container.views.graph.show({ preserveFocus: preserveFocus }, args);
 				} else {
 					void panels.show({ preserveFocus: preserveFocus }, args);
 				}
@@ -184,7 +186,7 @@ export function registerGraphWebviewCommands<T>(
 				}
 
 				const preserveFocus = 'preserveFocus' in args ? args.preserveFocus ?? false : false;
-				void container.graphView.show({ preserveFocus: preserveFocus }, args);
+				void container.views.graph.show({ preserveFocus: preserveFocus }, args);
 			},
 		),
 		registerCommand(`${panels.id}.refresh`, () => void panels.getActiveInstance()?.refresh(true)),

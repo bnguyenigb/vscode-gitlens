@@ -1,6 +1,7 @@
 import type { TemplateResult } from 'lit';
 import { html, LitElement } from 'lit';
 import { property } from 'lit/decorators.js';
+import { when } from 'lit/directives/when.js';
 import type { TextDocumentShowOptions } from 'vscode';
 import type { HierarchicalItem } from '../../../../system/array';
 import { makeHierarchical } from '../../../../system/array';
@@ -101,7 +102,19 @@ export class GlDetailsBase extends LitElement {
 						icon="${icon}"
 					></action-item>
 				</action-nav>
-
+				${when(
+					fileCount > 0 && this.tab === 'wip',
+					() =>
+						html`<div class="section section--actions">
+							<p class="button-container">
+								<span class="button-group button-group--single">
+									<gl-button full href="command:workbench.view.scm"
+										>Commit via SCM <code-icon rotate="45" icon="arrow-up" slot="suffix"></code-icon
+									></gl-button>
+								</span>
+							</p>
+						</div>`,
+				)}
 				${this.renderTreeFileModel(treeModel)}
 			</webview-pane>
 		`;
@@ -134,7 +147,7 @@ export class GlDetailsBase extends LitElement {
 			return this.createFileTreeModel(mode, files, isTree, compact);
 		}
 
-		const children = [];
+		const children: TreeModel[] = [];
 		const staged: Files = [];
 		const unstaged: Files = [];
 		for (const f of files) {
@@ -198,7 +211,7 @@ export class GlDetailsBase extends LitElement {
 	}
 
 	protected createFileTreeModel(
-		mode: Mode,
+		_mode: Mode,
 		files: Files,
 		isTree = false,
 		compact = true,
@@ -326,7 +339,7 @@ export class GlDetailsBase extends LitElement {
 			checked: false,
 			icon: { type: 'status', name: file.status }, // 'file',
 			label: fileName,
-			description: flat === true ? filePath : undefined,
+			description: `${flat === true ? filePath : ''}${file.status === 'R' ? ` ← ${file.originalPath}` : ''}`,
 			context: [file],
 			actions: this.getFileActions(file, options),
 			// decorations: [{ type: 'text', label: file.status }],
@@ -416,7 +429,7 @@ export class GlDetailsBase extends LitElement {
 		const [file] = e.detail.context;
 		const event = new CustomEvent('file-open', {
 			detail: this.getEventDetail(file, {
-				preview: false,
+				preview: !e.detail.dblClick,
 				viewColumn: e.detail.altKey ? BesideViewColumn : undefined,
 			}),
 		});
@@ -429,7 +442,7 @@ export class GlDetailsBase extends LitElement {
 		const [file] = e.detail.context;
 		const event = new CustomEvent('file-open-on-remote', {
 			detail: this.getEventDetail(file, {
-				preview: false,
+				preview: !e.detail.dblClick,
 				viewColumn: e.detail.altKey ? BesideViewColumn : undefined,
 			}),
 		});
@@ -442,7 +455,7 @@ export class GlDetailsBase extends LitElement {
 		const [file] = e.detail.context;
 		const event = new CustomEvent('file-compare-working', {
 			detail: this.getEventDetail(file, {
-				preview: false,
+				preview: !e.detail.dblClick,
 				viewColumn: e.detail.altKey ? BesideViewColumn : undefined,
 			}),
 		});
@@ -455,7 +468,7 @@ export class GlDetailsBase extends LitElement {
 		const [file] = e.detail.context;
 		const event = new CustomEvent('file-compare-previous', {
 			detail: this.getEventDetail(file, {
-				preview: false,
+				preview: !e.detail.dblClick,
 				viewColumn: e.detail.altKey ? BesideViewColumn : undefined,
 			}),
 		});
@@ -478,7 +491,7 @@ export class GlDetailsBase extends LitElement {
 		const [file] = e.detail.context;
 		const event = new CustomEvent('file-stage', {
 			detail: this.getEventDetail(file, {
-				preview: false,
+				preview: !e.detail.dblClick,
 				viewColumn: e.detail.altKey ? BesideViewColumn : undefined,
 			}),
 		});
@@ -491,7 +504,7 @@ export class GlDetailsBase extends LitElement {
 		const [file] = e.detail.context;
 		const event = new CustomEvent('file-unstage', {
 			detail: this.getEventDetail(file, {
-				preview: false,
+				preview: !e.detail.dblClick,
 				viewColumn: e.detail.altKey ? BesideViewColumn : undefined,
 			}),
 		});

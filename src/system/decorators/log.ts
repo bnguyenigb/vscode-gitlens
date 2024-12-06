@@ -4,7 +4,7 @@ import { getParameters } from '../function';
 import { getLoggableName, Logger } from '../logger';
 import { slowCallWarningThreshold } from '../logger.constants';
 import type { LogScope } from '../logger.scope';
-import { clearLogScope, logScopeIdGenerator, setLogScope } from '../logger.scope';
+import { clearLogScope, getLoggableScopeBlock, logScopeIdGenerator, setLogScope } from '../logger.scope';
 import { isPromise } from '../promise';
 import { getDurationMilliseconds } from '../string';
 
@@ -40,6 +40,7 @@ interface LogOptions<T extends (...arg: any) => any> {
 export const LogInstanceNameFn = Symbol('logInstanceNameFn');
 
 export function logName<T>(fn: (c: T, name: string) => string) {
+	// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
 	return (target: Function) => {
 		(target as any)[LogInstanceNameFn] = fn;
 	};
@@ -88,7 +89,8 @@ export function log<T extends (...arg: any) => any>(options?: LogOptions<T>, deb
 	const logFn: (message: string, ...params: any[]) => void = debug ? Logger.debug : Logger.log;
 	const logLevel = debugging ? 'debug' : 'info';
 
-	return (target: any, key: string, descriptor: PropertyDescriptor & Record<string, any>) => {
+	return (_target: any, key: string, descriptor: PropertyDescriptor & Record<string, any>) => {
+		// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
 		let fn: Function | undefined;
 		let fnKey: string | undefined;
 		if (typeof descriptor.value === 'function') {
@@ -107,16 +109,14 @@ export function log<T extends (...arg: any) => any>(options?: LogOptions<T>, deb
 				return fn.apply(this, args);
 			}
 
+			const prevScopeId = logScopeIdGenerator.current;
 			const scopeId = logScopeIdGenerator.next();
 
-			const instanceName =
-				this != null
-					? this.constructor?.[LogInstanceNameFn]?.(this, getLoggableName(this)) ?? getLoggableName(this)
-					: undefined;
+			const instanceName = this != null ? getLoggableName(this) : undefined;
 
 			let prefix = instanceName
 				? scoped
-					? `[${scopeId.toString(16).padStart(5)}] ${instanceName}.${key}`
+					? `${getLoggableScopeBlock(scopeId, prevScopeId)} ${instanceName}.${key}`
 					: `${instanceName}.${key}`
 				: key;
 
@@ -135,8 +135,7 @@ export function log<T extends (...arg: any) => any>(options?: LogOptions<T>, deb
 
 			let scope: LogScope | undefined;
 			if (scoped) {
-				scope = { scopeId: scopeId, prefix: prefix };
-				setLogScope(scopeId, scope);
+				scope = setLogScope(scopeId, { scopeId: scopeId, prevScopeId: prevScopeId, prefix: prefix });
 			}
 
 			const enter = enterFn != null ? enterFn(...args) : '';
@@ -193,7 +192,7 @@ export function log<T extends (...arg: any) => any>(options?: LogOptions<T>, deb
 			if (singleLine || timed || exitFn != null) {
 				const start = timed ? hrtime() : undefined;
 
-				const logError = (ex: Error) => {
+				const logError = (ex: unknown) => {
 					const timing = start !== undefined ? ` [${getDurationMilliseconds(start)}ms]` : '';
 					if (singleLine) {
 						Logger.error(
@@ -224,7 +223,7 @@ export function log<T extends (...arg: any) => any>(options?: LogOptions<T>, deb
 
 				const logResult = (r: any) => {
 					let duration: number | undefined;
-					let exitLogFn;
+					let exitLogFn: typeof logFn;
 					let timing;
 					if (start != null) {
 						duration = getDurationMilliseconds(start);
@@ -253,7 +252,7 @@ export function log<T extends (...arg: any) => any>(options?: LogOptions<T>, deb
 						}
 					} else if (scope?.exitFailed) {
 						exit = scope.exitFailed;
-						exitLogFn = Logger.error;
+						exitLogFn = (message: string, ...params: any[]) => Logger.error(null, message, ...params);
 					} else {
 						exit = 'completed';
 					}

@@ -5,6 +5,7 @@ import type { DraftPatchFileChange, DraftVisibility } from '../../../../gk/model
 import type { State, SwitchModeParams } from '../../../../plus/webviews/patchDetails/protocol';
 import {
 	ApplyPatchCommand,
+	ArchiveDraftCommand,
 	CopyCloudLinkCommand,
 	CreateFromLocalPatchCommand,
 	CreatePatchCommand,
@@ -16,6 +17,7 @@ import {
 	DraftPatchCheckedCommand,
 	ExecuteFileActionCommand,
 	ExplainRequest,
+	GenerateRequest,
 	OpenFileCommand,
 	OpenFileComparePreviousCommand,
 	OpenFileCompareWorkingCommand,
@@ -32,13 +34,14 @@ import {
 	UpdatePreferencesCommand,
 } from '../../../../plus/webviews/patchDetails/protocol';
 import { debounce } from '../../../../system/function';
-import type { Serialized } from '../../../../system/serialize';
+import type { Serialized } from '../../../../system/vscode/serialize';
 import type { IpcMessage } from '../../../protocol';
 import { ExecuteCommand } from '../../../protocol';
 import { App } from '../../shared/appBase';
 import { DOM } from '../../shared/dom';
 import type {
 	ApplyPatchDetail,
+	DraftReasonEventDetail,
 	GlDraftDetails,
 	PatchCheckedDetail,
 	PatchDetailsUpdateSelectionEventDetail,
@@ -83,6 +86,9 @@ export class PatchDetailsApp extends App<Serialized<State>> {
 			DOM.on<GlDraftDetails, ApplyPatchDetail>('gl-draft-details', 'gl-patch-apply-patch', e =>
 				this.onApplyPatch(e.detail),
 			),
+			DOM.on<GlDraftDetails, DraftReasonEventDetail>('gl-draft-details', 'gl-draft-archive', e =>
+				this.onArchiveDraft(e.detail.reason),
+			),
 			DOM.on<GlPatchDetailsApp, ChangePatchBaseDetail>('gl-patch-details-app', 'change-patch-base', e =>
 				this.onChangePatchBase(e.detail),
 			),
@@ -123,6 +129,9 @@ export class PatchDetailsApp extends App<Serialized<State>> {
 				'gl-patch-create',
 				'gl-patch-create-repo-checked',
 				e => this.onCreateCheckRepo(e.detail),
+			),
+			DOM.on<GlPatchCreate, CreatePatchMetadataEventDetail>('gl-patch-create', 'gl-patch-generate-title', e =>
+				this.onCreateGenerateTitle(e.detail),
 			),
 			DOM.on<GlPatchCreate, CreatePatchMetadataEventDetail>(
 				'gl-patch-create',
@@ -250,6 +259,36 @@ export class PatchDetailsApp extends App<Serialized<State>> {
 		this.sendCommand(UpdateCreatePatchMetadataCommand, e);
 	}
 
+	private async onCreateGenerateTitle(_e: CreatePatchMetadataEventDetail) {
+		try {
+			const result = await this.sendRequest(GenerateRequest, undefined);
+
+			if (result.error) {
+				this.component.generate = { error: { message: result.error.message ?? 'Error retrieving content' } };
+			} else if (result.title || result.description) {
+				this.component.generate = {
+					title: result.title,
+					description: result.description,
+				};
+
+				this.state = {
+					...this.state,
+					create: {
+						...this.state.create!,
+						title: result.title ?? this.state.create?.title,
+						description: result.description ?? this.state.create?.description,
+					},
+				};
+				this.setState(this.state);
+				this.debouncedAttachState();
+			} else {
+				this.component.generate = undefined;
+			}
+		} catch (_ex) {
+			this.component.generate = { error: { message: 'Error retrieving content' } };
+		}
+	}
+
 	private onDraftUpdateMetadata(e: { visibility: DraftVisibility }) {
 		this.sendCommand(UpdatePatchDetailsMetadataCommand, e);
 	}
@@ -291,6 +330,10 @@ export class PatchDetailsApp extends App<Serialized<State>> {
 		});
 	}
 
+	private onArchiveDraft(reason?: DraftReasonEventDetail['reason']) {
+		this.sendCommand(ArchiveDraftCommand, { reason: reason });
+	}
+
 	private onChangePatchBase(e: ChangePatchBaseDetail) {
 		console.log('onChangePatchBase', e);
 		this.sendCommand(SelectPatchBaseCommand, undefined);
@@ -318,12 +361,10 @@ export class PatchDetailsApp extends App<Serialized<State>> {
 
 			if (result.error) {
 				this.component.explain = { error: { message: result.error.message ?? 'Error retrieving content' } };
-			} else if (result.summary) {
-				this.component.explain = { summary: result.summary };
 			} else {
-				this.component.explain = undefined;
+				this.component.explain = result;
 			}
-		} catch (ex) {
+		} catch (_ex) {
 			this.component.explain = { error: { message: 'Error retrieving content' } };
 		}
 	}

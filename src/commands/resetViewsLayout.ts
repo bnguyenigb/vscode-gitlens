@@ -1,7 +1,8 @@
-import type { ViewIds } from '../constants';
-import { Commands, viewIdsByDefaultContainerId } from '../constants';
+import { Commands } from '../constants.commands';
+import type { ViewIds } from '../constants.views';
+import { viewIdsByDefaultContainerId } from '../constants.views';
 import type { Container } from '../container';
-import { command, executeCoreCommand } from '../system/command';
+import { command, executeCoreCommand } from '../system/vscode/command';
 import { Command } from './base';
 
 @command()

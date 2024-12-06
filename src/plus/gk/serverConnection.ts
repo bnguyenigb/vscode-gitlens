@@ -1,12 +1,31 @@
-import type { CancellationToken, Disposable } from 'vscode';
-import { version as codeVersion, env, Uri } from 'vscode';
 import type { HeadersInit, RequestInfo, RequestInit, Response } from '@env/fetch';
 import { fetch as _fetch, getProxyAgent } from '@env/fetch';
 import { getPlatform } from '@env/platform';
+import type { RequestError } from '@octokit/request-error';
+import type { CancellationToken } from 'vscode';
+import { version as codeVersion, env, Uri, window } from 'vscode';
+import type { Disposable } from '../../api/gitlens';
 import type { Container } from '../../container';
-import { AuthenticationRequiredError, CancellationError } from '../../errors';
+import {
+	AuthenticationError,
+	AuthenticationErrorReason,
+	AuthenticationRequiredError,
+	CancellationError,
+	RequestClientError,
+	RequestGoneError,
+	RequestNotFoundError,
+	RequestRateLimitError,
+	RequestsAreBlockedTemporarilyError,
+	RequestUnprocessableEntityError,
+} from '../../errors';
+import {
+	showGkDisconnectedTooManyFailedRequestsWarningMessage,
+	showGkRequestFailed500WarningMessage,
+	showGkRequestTimedOutWarningMessage,
+} from '../../messages';
 import { memoize } from '../../system/decorators/memoize';
 import { Logger } from '../../system/logger';
+import type { LogScope } from '../../system/logger.scope';
 import { getLogScope } from '../../system/logger.scope';
 
 interface FetchOptions {
@@ -25,48 +44,6 @@ export class ServerConnection implements Disposable {
 	constructor(private readonly container: Container) {}
 
 	dispose() {}
-
-	@memoize()
-	private get baseGkDevAccountsUri(): Uri {
-		if (this.container.env === 'staging') {
-			return Uri.parse('https://staging.gitkraken.dev');
-		}
-
-		if (this.container.env === 'dev') {
-			return Uri.parse('https://dev.gitkraken.dev');
-		}
-
-		return Uri.parse('https://gitkraken.dev');
-	}
-
-	getGkDevAccountsUri(path?: string, query?: string) {
-		let uri = path != null ? Uri.joinPath(this.baseGkDevAccountsUri, path) : this.baseGkDevAccountsUri;
-		if (query != null) {
-			uri = uri.with({ query: query });
-		}
-		return uri;
-	}
-
-	@memoize()
-	private get accountsUri(): Uri {
-		if (this.container.env === 'staging') {
-			return Uri.parse('https://stagingapp.gitkraken.com');
-		}
-
-		if (this.container.env === 'dev') {
-			return Uri.parse('https://devapp.gitkraken.com');
-		}
-
-		return Uri.parse('https://app.gitkraken.com');
-	}
-
-	getAccountsUri(path?: string, query?: string) {
-		let uri = path != null ? Uri.joinPath(this.accountsUri, path) : this.accountsUri;
-		if (query != null) {
-			uri = uri.with({ query: query });
-		}
-		return uri;
-	}
 
 	@memoize()
 	private get baseApiUri(): Uri {
@@ -100,28 +77,6 @@ export class ServerConnection implements Disposable {
 
 	getGkDevApiUrl(...pathSegments: string[]) {
 		return Uri.joinPath(this.baseGkDevApiUri, ...pathSegments).toString();
-	}
-
-	@memoize()
-	get siteUri(): Uri {
-		const { env } = this.container;
-		if (env === 'staging') {
-			return Uri.parse('https://staging.gitkraken.com');
-		}
-
-		if (env === 'dev') {
-			return Uri.parse('https://dev.gitkraken.com');
-		}
-
-		return Uri.parse('https://gitkraken.com');
-	}
-
-	getSiteUri(path?: string, query?: string) {
-		let uri = path != null ? Uri.joinPath(this.siteUri, path) : this.siteUri;
-		if (query != null) {
-			uri = uri.with({ query: query });
-		}
-		return uri;
 	}
 
 	@memoize()
@@ -199,6 +154,9 @@ export class ServerConnection implements Disposable {
 	}
 
 	private async gkFetch(url: RequestInfo, init?: RequestInit, options?: GKFetchOptions): Promise<Response> {
+		if (this.requestsAreBlocked) {
+			throw new RequestsAreBlockedTemporarilyError();
+		}
 		const scope = getLogScope();
 
 		try {
@@ -233,9 +191,8 @@ export class ServerConnection implements Disposable {
 					url = `${url}?${options.query}`;
 				}
 			}
-			// TODO@eamodio handle common response errors
 
-			return this.fetch(
+			const rsp = await this.fetch(
 				url,
 				{
 					...init,
@@ -243,9 +200,144 @@ export class ServerConnection implements Disposable {
 				},
 				options,
 			);
+			if (!rsp.ok) {
+				await this.handleGkUnsuccessfulResponse(rsp, scope);
+			} else {
+				this.resetRequestExceptionCount();
+			}
+			return rsp;
 		} catch (ex) {
-			Logger.error(ex, scope);
+			this.handleGkRequestError('gitkraken', ex, scope);
 			throw ex;
+		}
+	}
+
+	private buildRequestRateLimitError(token: string | undefined, ex: RequestError) {
+		let resetAt: number | undefined;
+
+		const reset = ex.response?.headers?.['x-ratelimit-reset'];
+		if (reset != null) {
+			resetAt = parseInt(reset, 10);
+			if (Number.isNaN(resetAt)) {
+				resetAt = undefined;
+			}
+		}
+		return new RequestRateLimitError(ex, token, resetAt);
+	}
+
+	private async handleGkUnsuccessfulResponse(rsp: Response, scope: LogScope | undefined): Promise<void> {
+		let content;
+		switch (rsp.status) {
+			// Forbidden
+			case 403:
+				if (rsp.statusText.includes('rate limit')) {
+					this.trackRequestException();
+				}
+				return;
+			// Too Many Requests
+			case 429:
+				this.trackRequestException();
+				return;
+			// Internal Server Error
+			case 500:
+				this.trackRequestException();
+				void showGkRequestFailed500WarningMessage(
+					'GitKraken failed to respond and might be experiencing issues. Please visit the [GitKraken status page](https://cloud.gitkrakenstatus.com) for more information.',
+				);
+				return;
+			// Bad Gateway
+			case 502: {
+				// Be sure to clone the response so we don't impact any upstream consumers
+				content = await rsp.clone().text();
+
+				Logger.error(undefined, scope, `GitKraken request failed: ${content} (${rsp.statusText})`);
+				if (content.includes('timeout')) {
+					this.trackRequestException();
+					void showGkRequestTimedOutWarningMessage();
+				}
+				return;
+			}
+			// Service Unavailable
+			case 503: {
+				// Be sure to clone the response so we don't impact any upstream consumers
+				content = await rsp.clone().text();
+
+				Logger.error(undefined, scope, `GitKraken request failed: ${content} (${rsp.statusText})`);
+				this.trackRequestException();
+				void showGkRequestFailed500WarningMessage(
+					'GitKraken failed to respond and might be experiencing issues. Please visit the [GitKraken status page](https://cloud.gitkrakenstatus.com) for more information.',
+				);
+				return;
+			}
+		}
+
+		if (rsp.status >= 400 && rsp.status < 500) return;
+
+		if (Logger.isDebugging) {
+			// Be sure to clone the response so we don't impact any upstream consumers
+			content ??= await rsp.clone().text();
+			void window.showErrorMessage(`DEBUGGING: GitKraken request failed: ${content} (${rsp.statusText})`);
+		}
+	}
+
+	private handleGkRequestError(
+		token: string | undefined,
+		ex: RequestError | (Error & { name: 'AbortError' }),
+		scope: LogScope | undefined,
+	): void {
+		if (ex instanceof CancellationError) throw ex;
+		if (ex.name === 'AbortError') throw new CancellationError(ex);
+
+		switch (ex.status) {
+			case 404: // Not found
+				throw new RequestNotFoundError(ex);
+			case 410: // Gone
+				throw new RequestGoneError(ex);
+			case 422: // Unprocessable Entity
+				throw new RequestUnprocessableEntityError(ex);
+			case 401: // Unauthorized
+				throw new AuthenticationError('gitkraken', AuthenticationErrorReason.Unauthorized, ex);
+			case 429: //Too Many Requests
+				this.trackRequestException();
+				throw this.buildRequestRateLimitError(token, ex);
+			case 403: // Forbidden
+				if (ex.message.includes('rate limit')) {
+					this.trackRequestException();
+					throw this.buildRequestRateLimitError(token, ex);
+				}
+				throw new AuthenticationError('gitkraken', AuthenticationErrorReason.Forbidden, ex);
+			case 500: // Internal Server Error
+				Logger.error(ex, scope);
+				if (ex.response != null) {
+					this.trackRequestException();
+					void showGkRequestFailed500WarningMessage(
+						'GitKraken failed to respond and might be experiencing issues. Please visit the [GitKraken status page](https://cloud.gitkrakenstatus.com) for more information.',
+					);
+				}
+				return;
+			case 502: // Bad Gateway
+				Logger.error(ex, scope);
+				if (ex.message.includes('timeout')) {
+					this.trackRequestException();
+					void showGkRequestTimedOutWarningMessage();
+				}
+				break;
+			case 503: // Service Unavailable
+				Logger.error(ex, scope);
+				this.trackRequestException();
+				void showGkRequestFailed500WarningMessage(
+					'GitKraken failed to respond and might be experiencing issues. Please visit the [GitKraken status page](https://cloud.gitkrakenstatus.com) for more information.',
+				);
+				return;
+			default:
+				if (ex.status >= 400 && ex.status < 500) throw new RequestClientError(ex);
+				break;
+		}
+
+		if (Logger.isDebugging) {
+			void window.showErrorMessage(
+				`DEBUGGING: GitKraken request failed: ${(ex.response as any)?.errors?.[0]?.message ?? ex.message}`,
+			);
 		}
 	}
 
@@ -254,6 +346,24 @@ export class ServerConnection implements Disposable {
 		if (session != null) return session.accessToken;
 
 		throw new AuthenticationRequiredError();
+	}
+
+	private requestExceptionCount = 0;
+	private requestsAreBlocked = false;
+
+	resetRequestExceptionCount(): void {
+		this.requestExceptionCount = 0;
+		this.requestsAreBlocked = false;
+	}
+
+	trackRequestException(): void {
+		this.requestExceptionCount++;
+
+		if (this.requestExceptionCount >= 5 && !this.requestsAreBlocked) {
+			void showGkDisconnectedTooManyFailedRequestsWarningMessage();
+			this.requestsAreBlocked = true;
+			this.requestExceptionCount = 0;
+		}
 	}
 }
 

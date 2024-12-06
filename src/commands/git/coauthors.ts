@@ -1,8 +1,8 @@
 import type { Container } from '../../container';
 import type { GitContributor } from '../../git/models/contributor';
 import type { Repository } from '../../git/models/repository';
-import { executeCoreCommand } from '../../system/command';
 import { normalizePath } from '../../system/path';
+import { executeCoreCommand } from '../../system/vscode/command';
 import type { ViewsWithRepositoryFolders } from '../../views/viewBase';
 import type { PartialStepState, StepGenerator, StepState } from '../quickCommand';
 import { endSteps, QuickCommand, StepResultBreak } from '../quickCommand';
@@ -64,7 +64,7 @@ export class CoAuthorsGitCommand extends QuickCommand<State> {
 
 		const index = message.indexOf('Co-authored-by: ');
 		if (index !== -1) {
-			message = message.substring(0, index - 1).trimRight();
+			message = message.substring(0, index - 1).trimEnd();
 		}
 
 		if (state.contributors != null && !Array.isArray(state.contributors)) {
@@ -92,7 +92,7 @@ export class CoAuthorsGitCommand extends QuickCommand<State> {
 		const context: Context = {
 			repos: this.container.git.openRepositories,
 			activeRepo: undefined,
-			associatedView: this.container.contributorsView,
+			associatedView: this.container.views.contributors,
 			title: this.title,
 		};
 

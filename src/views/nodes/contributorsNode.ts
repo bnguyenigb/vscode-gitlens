@@ -3,8 +3,8 @@ import type { GitUri } from '../../git/gitUri';
 import type { GitContributor } from '../../git/models/contributor';
 import { sortContributors } from '../../git/models/contributor';
 import type { Repository } from '../../git/models/repository';
-import { configuration } from '../../system/configuration';
 import { debug } from '../../system/decorators/log';
+import { configuration } from '../../system/vscode/configuration';
 import type { ViewsWithContributorsNode } from '../viewBase';
 import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode';
 import type { ViewNode } from './abstract/viewNode';
@@ -57,7 +57,7 @@ export class ContributorsNode extends CacheableChildrenViewNode<
 
 			const stats = this.options?.stats ?? configuration.get('views.contributors.showStatistics');
 
-			const contributors = await this.repo.getContributors({
+			const contributors = await this.repo.git.getContributors({
 				all: all,
 				merges: this.options?.showMergeCommits,
 				ref: ref,
@@ -66,7 +66,7 @@ export class ContributorsNode extends CacheableChildrenViewNode<
 			if (contributors.length === 0) return [new MessageNode(this.view, this, 'No contributors could be found.')];
 
 			sortContributors(contributors);
-			const presenceMap = this.view.container.vsls.enabled ? await this.getPresenceMap(contributors) : undefined;
+			const presenceMap = this.view.container.vsls.active ? await this.getPresenceMap(contributors) : undefined;
 
 			this.children = contributors.map(
 				c =>

@@ -21,8 +21,6 @@
 		"strict": true,
 		"target": "es2022",
 		"useDefineForClassFields": true,
-		"useUnknownInCatchVariables": false,
-		"jsx": "react"
-	},
-	"include": ["src/**/*"]
+		"useUnknownInCatchVariables": false
+	}
 }

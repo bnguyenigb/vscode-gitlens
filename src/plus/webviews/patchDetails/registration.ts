@@ -1,20 +1,23 @@
 import { ViewColumn } from 'vscode';
-import { Commands } from '../../../constants';
-import { executeCommand } from '../../../system/command';
-import { configuration } from '../../../system/configuration';
-import { setContext } from '../../../system/context';
-import type { Serialized } from '../../../system/serialize';
+import { Commands } from '../../../constants.commands';
+import type { Sources } from '../../../constants.telemetry';
+import { executeCommand } from '../../../system/vscode/command';
+import { configuration } from '../../../system/vscode/configuration';
+import { setContext } from '../../../system/vscode/context';
+import type { Serialized } from '../../../system/vscode/serialize';
 import type { WebviewPanelShowCommandArgs, WebviewsController } from '../../../webviews/webviewsController';
 import type { CreateDraft, State, ViewDraft } from './protocol';
 
 export type ShowCreateDraft = {
 	mode: 'create';
 	create?: CreateDraft;
+	source?: Sources;
 };
 
 export type ShowViewDraft = {
 	mode: 'view';
 	draft: ViewDraft;
+	source?: Sources;
 };
 
 export type PatchDetailsWebviewShowingArgs = [ShowCreateDraft | ShowViewDraft];
@@ -27,6 +30,7 @@ export function registerPatchDetailsWebviewView(controller: WebviewsController) 
 			title: 'Patch',
 			contextKeyPrefix: `gitlens:webviewView:patchDetails`,
 			trackingFeature: 'patchDetailsView',
+			type: 'patchDetails',
 			plusFeature: true,
 			webviewHostOptions: {
 				retainContextWhenHidden: false,
@@ -63,6 +67,7 @@ export function registerPatchDetailsWebviewPanel(controller: WebviewsController)
 			title: 'Patch',
 			contextKeyPrefix: `gitlens:webview:patchDetails`,
 			trackingFeature: 'patchDetailsWebview',
+			type: 'patchDetails',
 			plusFeature: true,
 			column: ViewColumn.Active,
 			webviewHostOptions: {

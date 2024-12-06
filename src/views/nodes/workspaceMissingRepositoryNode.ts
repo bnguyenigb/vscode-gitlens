@@ -1,5 +1,5 @@
-import { MarkdownString, ThemeColor, ThemeIcon, TreeItem, TreeItemCollapsibleState, Uri } from 'vscode';
-import type { Colors } from '../../constants';
+import { MarkdownString, ThemeColor, ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
+import type { Colors } from '../../constants.colors';
 import { unknownGitUri } from '../../git/gitUri';
 import type {
 	CloudWorkspace,
@@ -7,6 +7,7 @@ import type {
 	LocalWorkspace,
 	LocalWorkspaceRepositoryDescriptor,
 } from '../../plus/workspaces/models';
+import { createViewDecorationUri } from '../viewDecorationProvider';
 import type { WorkspacesView } from '../workspacesView';
 import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode';
 
@@ -53,7 +54,8 @@ export class WorkspaceMissingRepositoryNode extends ViewNode<'workspace-missing-
 			'question',
 			new ThemeColor('gitlens.decorations.workspaceRepoMissingForegroundColor' satisfies Colors),
 		);
-		item.resourceUri = Uri.parse(`gitlens-view://workspaces/repository/missing`);
+		item.resourceUri = createViewDecorationUri('repository', { state: 'missing', workspace: true });
+
 		return item;
 	}
 }

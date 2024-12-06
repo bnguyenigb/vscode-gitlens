@@ -125,7 +125,7 @@ export class StashPushError extends Error {
 			switch (reason) {
 				case StashPushErrorReason.ConflictingStagedAndUnstagedLines:
 					message =
-						'Stash was created, but the working tree cannot be updated because at least one file has staged and unstaged changes on the same line(s).\n\nDo you want to try again by stashing both your staged and unstaged changes?';
+						'Changes were stashed, but the working tree cannot be updated because at least one file has staged and unstaged changes on the same line(s)';
 					break;
 				case StashPushErrorReason.NothingToSave:
 					message = 'No files to stash';
@@ -242,17 +242,12 @@ export class PullError extends Error {
 
 	constructor(reason?: PullErrorReason, original?: Error, branch?: string, remote?: string);
 	constructor(message?: string, original?: Error);
-	constructor(
-		messageOrReason: string | PullErrorReason | undefined,
-		original?: Error,
-		branch?: string,
-		remote?: string,
-	) {
+	constructor(messageOrReason: string | PullErrorReason | undefined, original?: Error) {
 		let message;
 		let reason: PullErrorReason | undefined;
-		const baseMessage = `Unable to pull${branch ? ` branch '${branch}'` : ''}${remote ? ` from ${remote}` : ''}`;
+		const baseMessage = `Unable to pull`;
 		if (messageOrReason == null) {
-			message = 'Unable to pull';
+			message = baseMessage;
 		} else if (typeof messageOrReason === 'string') {
 			message = messageOrReason;
 			reason = undefined;
@@ -454,7 +449,8 @@ export class WorktreeCreateError extends Error {
 
 export const enum WorktreeDeleteErrorReason {
 	HasChanges,
-	MainWorkingTree,
+	DefaultWorkingTree,
+	DirectoryNotEmpty,
 }
 
 export class WorktreeDeleteError extends Error {
@@ -481,8 +477,8 @@ export class WorktreeDeleteError extends Error {
 				case WorktreeDeleteErrorReason.HasChanges:
 					message = 'Unable to delete worktree because there are uncommitted changes';
 					break;
-				case WorktreeDeleteErrorReason.MainWorkingTree:
-					message = 'Unable to delete worktree because it is a main working tree';
+				case WorktreeDeleteErrorReason.DefaultWorkingTree:
+					message = 'Cannot delete worktree because it is the default working tree';
 					break;
 			}
 		}
@@ -491,5 +487,83 @@ export class WorktreeDeleteError extends Error {
 		this.original = original;
 		this.reason = reason;
 		Error.captureStackTrace?.(this, WorktreeDeleteError);
+	}
+}
+
+export const enum TagErrorReason {
+	TagAlreadyExists,
+	TagNotFound,
+	InvalidTagName,
+	PermissionDenied,
+	RemoteRejected,
+	Other,
+}
+
+export class TagError extends Error {
+	static is(ex: unknown, reason?: TagErrorReason): ex is TagError {
+		return ex instanceof TagError && (reason == null || ex.reason === reason);
+	}
+
+	readonly original?: Error;
+	readonly reason: TagErrorReason | undefined;
+	action?: string;
+	tag?: string;
+
+	private static buildTagErrorMessage(reason?: TagErrorReason, tag?: string, action?: string): string {
+		let baseMessage: string;
+		if (action != null) {
+			baseMessage = `Unable to ${action} tag ${tag ? `'${tag}'` : ''}`;
+		} else {
+			baseMessage = `Unable to perform action${tag ? ` with tag '${tag}'` : 'on tag'}`;
+		}
+
+		switch (reason) {
+			case TagErrorReason.TagAlreadyExists:
+				return `${baseMessage} because it already exists`;
+			case TagErrorReason.TagNotFound:
+				return `${baseMessage} because it does not exist`;
+			case TagErrorReason.InvalidTagName:
+				return `${baseMessage} because the tag name is invalid`;
+			case TagErrorReason.PermissionDenied:
+				return `${baseMessage} because you don't have permission to push to this remote repository.`;
+			case TagErrorReason.RemoteRejected:
+				return `${baseMessage} because the remote repository rejected the push.`;
+			default:
+				return baseMessage;
+		}
+	}
+
+	constructor(reason?: TagErrorReason, original?: Error, tag?: string, action?: string);
+	constructor(message?: string, original?: Error);
+	constructor(messageOrReason: string | TagErrorReason | undefined, original?: Error, tag?: string, action?: string) {
+		let reason: TagErrorReason | undefined;
+		if (typeof messageOrReason !== 'string') {
+			reason = messageOrReason as TagErrorReason;
+		} else {
+			super(messageOrReason);
+		}
+		const message =
+			typeof messageOrReason === 'string'
+				? messageOrReason
+				: TagError.buildTagErrorMessage(messageOrReason as TagErrorReason, tag, action);
+		super(message);
+
+		this.original = original;
+		this.reason = reason;
+		this.tag = tag;
+		this.action = action;
+		Error.captureStackTrace?.(this, TagError);
+	}
+
+	WithTag(tag: string) {
+		this.tag = tag;
+		this.message = TagError.buildTagErrorMessage(this.reason, tag, this.action);
+		return this;
+	}
+
+	WithAction(action: string) {
+		this.action = action;
+		this.message = TagError.buildTagErrorMessage(this.reason, this.tag, action);
+		return this;
 	}
 }

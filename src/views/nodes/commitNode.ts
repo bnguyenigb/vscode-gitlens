@@ -1,8 +1,8 @@
 import type { CancellationToken, Command } from 'vscode';
 import { MarkdownString, ThemeColor, ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
 import type { DiffWithPreviousCommandArgs } from '../../commands/diffWithPrevious';
-import type { Colors } from '../../constants';
-import { Commands } from '../../constants';
+import type { Colors } from '../../constants.colors';
+import { Commands } from '../../constants.commands';
 import { CommitFormatter } from '../../git/formatters/commitFormatter';
 import type { GitBranch } from '../../git/models/branch';
 import type { GitCommit } from '../../git/models/commit';
@@ -11,13 +11,12 @@ import type { GitRevisionReference } from '../../git/models/reference';
 import type { GitRemote } from '../../git/models/remote';
 import type { RemoteProvider } from '../../git/remotes/remoteProvider';
 import { makeHierarchical } from '../../system/array';
-import { pauseOnCancelOrTimeoutMapTuplePromise } from '../../system/cancellation';
-import { configuration } from '../../system/configuration';
-import { getContext } from '../../system/context';
 import { joinPaths, normalizePath } from '../../system/path';
 import type { Deferred } from '../../system/promise';
-import { defer, getSettledValue } from '../../system/promise';
+import { defer, getSettledValue, pauseOnCancelOrTimeoutMapTuplePromise } from '../../system/promise';
 import { sortCompare } from '../../system/string';
+import { configuration } from '../../system/vscode/configuration';
+import { getContext } from '../../system/vscode/context';
 import type { FileHistoryView } from '../fileHistoryView';
 import type { ViewsWithCommits } from '../viewBase';
 import { disposeChildren } from '../viewBase';
@@ -93,9 +92,11 @@ export class CommitNode extends ViewRefNode<'commit', ViewsWithCommits | FileHis
 			if (
 				this.view.type !== 'tags' &&
 				!this.unpublished &&
-				getContext('gitlens:hasConnectedRemotes') &&
-				this.view.config.pullRequests.enabled &&
-				this.view.config.pullRequests.showForCommits
+				this.view.config.pullRequests?.enabled &&
+				this.view.config.pullRequests?.showForCommits &&
+				// If we are in the context of a PR node, don't show the pull request node again
+				this.context.pullRequest == null &&
+				getContext('gitlens:repos:withHostingIntegrationsConnected')?.includes(commit.repoPath)
 			) {
 				pullRequest = this.getState('pullRequest');
 				if (pullRequest === undefined && this.getState('pendingPullRequest') === undefined) {

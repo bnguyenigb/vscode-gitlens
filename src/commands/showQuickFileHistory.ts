@@ -1,5 +1,5 @@
 import type { Range, TextEditor, Uri } from 'vscode';
-import { Commands } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { executeGitCommand } from '../git/actions';
 import { GitUri } from '../git/gitUri';
@@ -8,7 +8,7 @@ import type { GitLog } from '../git/models/log';
 import type { GitReference } from '../git/models/reference';
 import type { GitTag } from '../git/models/tag';
 import type { CommandQuickPickItem } from '../quickpicks/items/common';
-import { command } from '../system/command';
+import { command } from '../system/vscode/command';
 import type { CommandContext } from './base';
 import { ActiveEditorCachedCommand, getCommandUri } from './base';
 
@@ -55,7 +55,7 @@ export class ShowQuickFileHistoryCommand extends ActiveEditorCachedCommand {
 		const gitUri = await GitUri.fromUri(uri);
 
 		if (args?.showInSideBar) {
-			await this.container.fileHistoryView.showHistoryForUri(gitUri);
+			await this.container.views.fileHistory.showHistoryForUri(gitUri);
 
 			return;
 		}

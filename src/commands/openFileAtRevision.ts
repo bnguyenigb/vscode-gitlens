@@ -1,7 +1,8 @@
 import type { TextDocumentShowOptions, TextEditor } from 'vscode';
 import { Uri } from 'vscode';
 import type { FileAnnotationType } from '../config';
-import { Commands, GlyphChars, quickPickTitleMaxChars } from '../constants';
+import { GlyphChars, quickPickTitleMaxChars } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { openFileAtRevision } from '../git/actions/commit';
 import { GitUri } from '../git/gitUri';
@@ -11,10 +12,11 @@ import { showCommitPicker } from '../quickpicks/commitPicker';
 import { CommandQuickPickItem } from '../quickpicks/items/common';
 import type { DirectiveQuickPickItem } from '../quickpicks/items/directive';
 import { createDirectiveQuickPickItem, Directive } from '../quickpicks/items/directive';
-import { command } from '../system/command';
+import { createMarkdownCommandLink } from '../system/commands';
 import { Logger } from '../system/logger';
-import { splitPath } from '../system/path';
 import { pad } from '../system/string';
+import { command } from '../system/vscode/command';
+import { splitPath } from '../system/vscode/path';
 import type { CommandContext } from './base';
 import { ActiveEditorCommand, getCommandUri } from './base';
 import type { OpenFileAtRevisionFromCommandArgs } from './openFileAtRevisionFrom';
@@ -29,9 +31,9 @@ export interface OpenFileAtRevisionCommandArgs {
 
 @command()
 export class OpenFileAtRevisionCommand extends ActiveEditorCommand {
-	static getMarkdownCommandArgs(args: OpenFileAtRevisionCommandArgs): string;
-	static getMarkdownCommandArgs(revisionUri: Uri, annotationType?: FileAnnotationType, line?: number): string;
-	static getMarkdownCommandArgs(
+	static createMarkdownCommandLink(args: OpenFileAtRevisionCommandArgs): string;
+	static createMarkdownCommandLink(revisionUri: Uri, annotationType?: FileAnnotationType, line?: number): string;
+	static createMarkdownCommandLink(
 		argsOrUri: OpenFileAtRevisionCommandArgs | Uri,
 		annotationType?: FileAnnotationType,
 		line?: number,
@@ -49,7 +51,7 @@ export class OpenFileAtRevisionCommand extends ActiveEditorCommand {
 			args = argsOrUri;
 		}
 
-		return super.getMarkdownCommandArgsCore<OpenFileAtRevisionCommandArgs>(Commands.OpenFileAtRevision, args);
+		return createMarkdownCommandLink<OpenFileAtRevisionCommandArgs>(Commands.OpenFileAtRevision, args);
 	}
 
 	constructor(private readonly container: Container) {
@@ -141,7 +143,7 @@ export class OpenFileAtRevisionCommand extends ActiveEditorCommand {
 									getState: async () => {
 										const items: (CommandQuickPickItem | DirectiveQuickPickItem)[] = [];
 
-										const status = await this.container.git.getStatusForRepo(gitUri.repoPath);
+										const status = await this.container.git.getStatus(gitUri.repoPath);
 										if (status != null) {
 											for (const f of status.files) {
 												if (f.workingTreeStatus === '?' || f.workingTreeStatus === '!') {
@@ -191,7 +193,7 @@ export class OpenFileAtRevisionCommand extends ActiveEditorCommand {
 						picked: gitUri.sha,
 						keyboard: {
 							keys: ['right', 'alt+right', 'ctrl+right'],
-							onDidPressKey: async (key, item) => {
+							onDidPressKey: async (_key, item) => {
 								await openFileAtRevision(item.item.file!, item.item, {
 									annotationType: args.annotationType,
 									line: args.line,

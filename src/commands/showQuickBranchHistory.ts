@@ -1,11 +1,11 @@
 import type { TextEditor, Uri } from 'vscode';
-import { Commands } from '../constants';
+import { Commands } from '../constants.commands';
 import type { Container } from '../container';
 import { executeGitCommand } from '../git/actions';
 import { GitUri } from '../git/gitUri';
 import type { GitReference } from '../git/models/reference';
 import { createReference } from '../git/models/reference';
-import { command } from '../system/command';
+import { command } from '../system/vscode/command';
 import type { CommandContext } from './base';
 import { ActiveEditorCachedCommand, getCommandUri } from './base';
 

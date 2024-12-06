@@ -9,19 +9,23 @@
 		},
 		"useDefineForClassFields": false // Needed for lit decorators https://github.com/lit/lit/issues/3278 https://lit.dev/docs/tools/publishing/#publishing-modern-javascript
 	},
+	// Keep in sync with `eslint.config.mjs`
 	"include": [
 		"**/*",
-		"../../plus/gk/**/*",
-		"../../plus/webviews/**/*",
 		"../../@types/**/*",
+		"../../env/browser/**/*",
+		"../../plus/gk/account/promos.ts",
+		"../../plus/gk/account/subscription.ts",
+		"../../plus/webviews/**/protocol.ts",
 		"../protocol.ts",
 		"../**/protocol.ts",
 		"../../config.ts",
 		"../../constants.ts",
+		"../../constants.*.ts",
 		"../../features.ts",
 		"../../subscription.ts",
-		"../../system/**/*",
-		"../../env/browser/**/*"
+		"../../system/*.ts",
+		"../../system/decorators/log.ts"
 	],
-	"exclude": ["node_modules", "test"]
+	"exclude": []
 }

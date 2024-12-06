@@ -3,7 +3,8 @@ import type { OpenChangedFilesCommandArgs } from '../../commands/openChangedFile
 import type { OpenOnlyChangedFilesCommandArgs } from '../../commands/openOnlyChangedFiles';
 import { RevealInSideBarQuickInputButton, ShowDetailsViewQuickInputButton } from '../../commands/quickCommand.buttons';
 import type { Keys } from '../../constants';
-import { Commands, GlyphChars } from '../../constants';
+import { GlyphChars } from '../../constants';
+import { Commands } from '../../constants.commands';
 import { Container } from '../../container';
 import { browseAtRevision } from '../../git/actions';
 import * as CommitActions from '../../git/actions/commit';
@@ -135,7 +136,7 @@ export class CommitCompareWithHEADCommandQuickPickItem extends CommandQuickPickI
 	}
 
 	override execute(_options: { preserveFocus?: boolean; preview?: boolean }): Promise<CompareResultsNode> {
-		return Container.instance.searchAndCompareView.compare(this.commit.repoPath, this.commit.ref, 'HEAD');
+		return Container.instance.views.searchAndCompare.compare(this.commit.repoPath, this.commit.ref, 'HEAD');
 	}
 }
 
@@ -145,7 +146,7 @@ export class CommitCompareWithWorkingCommandQuickPickItem extends CommandQuickPi
 	}
 
 	override execute(_options: { preserveFocus?: boolean; preview?: boolean }): Promise<CompareResultsNode> {
-		return Container.instance.searchAndCompareView.compare(this.commit.repoPath, this.commit.ref, '');
+		return Container.instance.views.searchAndCompare.compare(this.commit.repoPath, this.commit.ref, '');
 	}
 }
 
@@ -272,7 +273,7 @@ export class CommitOpenDirectoryCompareWithWorkingCommandQuickPickItem extends C
 
 export class CommitOpenDetailsCommandQuickPickItem extends CommandQuickPickItem {
 	constructor(private readonly commit: GitCommit) {
-		super('Open Details', new ThemeIcon('eye'));
+		super('Inspect Commit Details', new ThemeIcon('eye'));
 	}
 
 	override execute(options: { preserveFocus?: boolean; preview?: boolean }): Promise<void> {

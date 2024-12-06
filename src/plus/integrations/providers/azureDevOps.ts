@@ -1,4 +1,5 @@
-import type { AuthenticationSession } from 'vscode';
+import type { AuthenticationSession, CancellationToken } from 'vscode';
+import { HostingIntegrationId } from '../../../constants.integrations';
 import type { PagedResult } from '../../../git/gitProvider';
 import type { Account } from '../../../git/models/author';
 import type { DefaultBranch } from '../../../git/models/defaultBranch';
@@ -15,7 +16,7 @@ import type { IntegrationAuthenticationProviderDescriptor } from '../authenticat
 import type { ResourceDescriptor } from '../integration';
 import { HostingIntegration } from '../integration';
 import type { ProviderRepository } from './models';
-import { HostingIntegrationId, providersMetadata } from './models';
+import { providersMetadata } from './models';
 
 const metadata = providersMetadata[HostingIntegrationId.AzureDevOps];
 const authProvider = Object.freeze({ id: metadata.id, scopes: metadata.scopes });
@@ -59,17 +60,9 @@ export class AzureDevOpsIntegration extends HostingIntegration<
 		}
 	}
 
-	// TODO: implement
-	protected override async getProviderCurrentAccount(
-		_session: AuthenticationSession,
-		_options?: { avatarSize?: number },
-	): Promise<Account | undefined> {
-		return Promise.resolve(undefined);
-	}
-
 	protected override async mergeProviderPullRequest(
 		_session: AuthenticationSession,
-		_pr: PullRequest | { id: string; headRefSha: string },
+		_pr: PullRequest,
 		_options?: {
 			mergeMethod?: PullRequestMergeMethod;
 		},
@@ -137,6 +130,7 @@ export class AzureDevOpsIntegration extends HostingIntegration<
 	protected override async getProviderRepositoryMetadata(
 		_session: AuthenticationSession,
 		_repo: AzureRepositoryDescriptor,
+		_cancellation?: CancellationToken,
 	): Promise<RepositoryMetadata | undefined> {
 		return Promise.resolve(undefined);
 	}

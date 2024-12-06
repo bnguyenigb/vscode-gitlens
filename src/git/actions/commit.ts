@@ -9,13 +9,15 @@ import type { OpenWorkingFileCommandArgs } from '../../commands/openWorkingFile'
 import type { ShowQuickCommitCommandArgs } from '../../commands/showQuickCommit';
 import type { ShowQuickCommitFileCommandArgs } from '../../commands/showQuickCommitFile';
 import type { FileAnnotationType } from '../../config';
-import { Commands, GlyphChars } from '../../constants';
+import { GlyphChars } from '../../constants';
+import { Commands } from '../../constants.commands';
 import { Container } from '../../container';
 import type { ShowInCommitGraphCommandArgs } from '../../plus/webviews/graph/protocol';
 import { showRevisionFilesPicker } from '../../quickpicks/revisionFilesPicker';
-import { executeCommand, executeCoreGitCommand, executeEditorCommand } from '../../system/command';
-import { configuration } from '../../system/configuration';
-import { findOrOpenEditor, findOrOpenEditors, openChangesEditor } from '../../system/utils';
+import { getSettledValue } from '../../system/promise';
+import { executeCommand, executeCoreGitCommand, executeEditorCommand } from '../../system/vscode/command';
+import { configuration } from '../../system/vscode/configuration';
+import { findOrOpenEditor, findOrOpenEditors, openChangesEditor } from '../../system/vscode/utils';
 import { GitUri } from '../gitUri';
 import type { GitCommit } from '../models/commit';
 import { isCommit } from '../models/commit';
@@ -215,8 +217,16 @@ export async function openAllChangesInChangesEditor(
 	const resources: Parameters<typeof openChangesEditor>[0] = [];
 	for (const file of files) {
 		let rhs = file.status === 'D' ? undefined : (await git.getBestRevisionUri(refs.repoPath, file.path, refs.rhs))!;
-		if (rhs != null && refs.rhs === '') {
-			rhs = await git.getWorkingUri(refs.repoPath, rhs);
+		if (refs.rhs === '') {
+			if (rhs != null) {
+				rhs = await git.getWorkingUri(refs.repoPath, rhs);
+			} else {
+				rhs = Uri.from({
+					scheme: 'untitled',
+					authority: '',
+					path: git.getAbsoluteUri(file.path, refs.repoPath).fsPath,
+				});
+			}
 		}
 
 		const lhs =
@@ -224,7 +234,9 @@ export async function openAllChangesInChangesEditor(
 				? undefined
 				: (await git.getBestRevisionUri(refs.repoPath, file.originalPath ?? file.path, refs.lhs))!;
 
-		const uri = (file.status === 'D' ? lhs : rhs) ?? GitUri.fromFile(file, refs.repoPath);
+		const uri = (file.status === 'D' ? lhs : rhs) ?? git.getAbsoluteUri(file.path, refs.repoPath);
+		if (rhs?.scheme === 'untitled' && lhs == null) continue;
+
 		resources.push({ uri: uri, lhs: lhs, rhs: rhs });
 	}
 
@@ -634,7 +646,7 @@ export async function openFileAtRevision(
 				placeholder: 'Choose a file revision to open',
 				keyboard: {
 					keys: ['right', 'alt+right', 'ctrl+right'],
-					onDidPressKey: async (key, uri) => {
+					onDidPressKey: async (_key, uri) => {
 						await findOrOpenEditor(uri, { ...opts, preserveFocus: true, preview: true });
 					},
 				},
@@ -758,7 +770,7 @@ export async function restoreFile(file: string | GitFile, revision: GitRevisionR
 	await Container.instance.git.checkout(revision.repoPath, ref, { path: path });
 }
 
-export async function reveal(
+export function reveal(
 	commit: GitRevisionReference,
 	options?: {
 		select?: boolean;
@@ -766,19 +778,7 @@ export async function reveal(
 		expand?: boolean | number;
 	},
 ) {
-	const views = [Container.instance.commitsView, Container.instance.branchesView, Container.instance.remotesView];
-
-	// TODO@eamodio stop duplicate notifications
-
-	for (const view of views) {
-		const node = view.canReveal
-			? await view.revealCommit(commit, options)
-			: await Container.instance.repositoriesView.revealCommit(commit, options);
-		if (node != null) return node;
-	}
-
-	void views[0].show({ preserveFocus: !options?.focus });
-	return undefined;
+	return Container.instance.views.revealCommit(commit, options);
 }
 
 export async function showDetailsQuickPick(commit: GitCommit, uri?: Uri): Promise<void>;
@@ -798,6 +798,7 @@ export async function showDetailsQuickPick(commit: GitCommit, fileOrUri?: string
 
 	void (await executeCommand<[Uri, ShowQuickCommitFileCommandArgs]>(Commands.ShowQuickCommitFile, uri, {
 		sha: commit.sha,
+		commit: commit,
 	}));
 }
 
@@ -806,7 +807,7 @@ export function showDetailsView(
 	options?: { pin?: boolean; preserveFocus?: boolean; preserveVisibility?: boolean },
 ): Promise<void> {
 	const { preserveFocus, ...opts } = { ...options, commit: commit };
-	return Container.instance.commitDetailsView.show({ preserveFocus: preserveFocus }, opts);
+	return Container.instance.views.commitDetails.show({ preserveFocus: preserveFocus }, opts);
 }
 
 export function showGraphDetailsView(
@@ -814,7 +815,7 @@ export function showGraphDetailsView(
 	options?: { pin?: boolean; preserveFocus?: boolean; preserveVisibility?: boolean },
 ): Promise<void> {
 	const { preserveFocus, ...opts } = { ...options, commit: commit };
-	return Container.instance.graphDetailsView.show({ preserveFocus: preserveFocus }, opts);
+	return Container.instance.views.graphDetails.show({ preserveFocus: preserveFocus }, opts);
 }
 
 export async function showInCommitGraph(
@@ -871,7 +872,7 @@ export async function undoCommit(container: Container, commit: GitRevisionRefere
 		return;
 	}
 
-	const status = await container.git.getStatusForRepo(commit.repoPath);
+	const status = await container.git.getStatus(commit.repoPath);
 	if (status?.files.length) {
 		const confirm = { title: 'Undo Commit' };
 		const cancel = { title: 'Cancel', isCloseAffordance: true };
@@ -974,4 +975,36 @@ async function getChangesRefsArgs(
 				commitOrFiles.unresolvedPreviousSha,
 		},
 	};
+}
+
+export async function getOrderedComparisonRefs(
+	container: Container,
+	repoPath: string,
+	refA: string,
+	refB: string,
+): Promise<[string, string]> {
+	// Check the ancestry of refA and refB to determine which is the "newer" one
+	const ancestor = await container.git.isAncestorOf(repoPath, refA, refB);
+	// If refB is an ancestor of refA, compare refA to refB (as refA is "newer")
+	if (ancestor) return [refB, refA];
+
+	const ancestor2 = await container.git.isAncestorOf(repoPath, refB, refA);
+	// If refA is an ancestor of refB, compare refB to refA (as refB is "newer")
+	if (ancestor2) return [refA, refB];
+
+	const [commitRefAResult, commitRefBResult] = await Promise.allSettled([
+		container.git.getCommit(repoPath, refA),
+		container.git.getCommit(repoPath, refB),
+	]);
+
+	const commitRefA = getSettledValue(commitRefAResult);
+	const commitRefB = getSettledValue(commitRefBResult);
+
+	if (commitRefB != null && commitRefA != null && commitRefB.date > commitRefA.date) {
+		// If refB is "newer", compare refB to refA
+		return [refB, refA];
+	}
+
+	// If refA is "newer", compare refA to refB
+	return [refA, refB];
 }
