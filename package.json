@@ -9658,7 +9658,7 @@
 		"image-minimizer-webpack-plugin": "2.2.0",
 		"imagemin-webp": "6.0.0",
 		"mini-css-extract-plugin": "1.4.1",
-		"node-sass": "5.0.0",
+		"node-sass": "9.0.0",
 		"prettier": "2.2.1",
 		"sass-loader": "11.0.1",
 		"terser-webpack-plugin": "5.1.1",
