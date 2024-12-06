@@ -934,14 +934,7 @@ export class SubscriptionService implements Disposable {
 				...subscription,
 				plan: {
 					...subscription.plan,
-					effective: getSubscriptionPlan(
-						SubscriptionPlanId.Pro,
-						false,
-						0,
-						undefined,
-						new Date(subscription.previewTrial.startedOn),
-						new Date(subscription.previewTrial.expiresOn),
-					),
+					effective: subscription.plan.actual,
 				},
 			};
 		}
